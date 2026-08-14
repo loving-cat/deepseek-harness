@@ -48,6 +48,12 @@ export interface Config {
   maxOutputBytes?: number
   /** The worker's max old-generation heap in MiB (`resourceLimits`); overflow kills the worker, surfacing as kind `'worker-exit'`. */
   maxOldGenerationSizeMb?: number
+  /** FIX②: maximum binding dispatches per run; excess calls fail fast with a binding error. */
+  maxDispatchesPerRun?: number
+  /** FIX②: maximum concurrently in-flight binding calls per run; excess calls park on a bounded queue. */
+  maxInFlightCalls?: number
+  /** FIX②: maximum parked binding calls awaiting an in-flight slot; excess calls fail fast. */
+  maxQueuedCalls?: number
 }
 
 /** {@link Config} after schemastery fills the defaults (every field present). */
@@ -189,10 +195,14 @@ class OutputLedger {
     return { logs, ...value !== undefined ? { value } : {} }
   }
 
-  /** Finalize a failure diagnostic, with output-limit taking precedence when combined bytes exceed the cap. */
+  /** Finalize a failure diagnostic; an oversized message keeps its fitting PREFIX (FIX③) instead of being replaced wholesale. */
   failure(logs: string[], error: CodeRunFailure): CodeRunResult {
-    if (jsonStringBytesUpTo(error.message, this.maxBytes - this.bytes) === undefined) return this.limit(logs)
-    return { logs, error }
+    const available = this.maxBytes - this.bytes
+    if (jsonStringBytesUpTo(error.message, available) !== undefined) return { logs, error }
+    // FIX③: truncate like logs do — the model keeps the actionable head of the real error.
+    const prefix = truncateJsonStringBytes(error.message, available)
+    if (prefix.length > 0) return { logs, error: { ...error, message: prefix } }
+    return this.limit(logs)
   }
 
   /** Build the explicit output-limit failure while retaining a fitting prefix of the final log. */
@@ -241,6 +251,9 @@ export class WorkerThreadCodeRuntime extends CodeRuntime {
     maxWallMs: z.number().default(600_000),
     maxOutputBytes: z.number().default(67_108_864),
     maxOldGenerationSizeMb: z.number().default(512),
+    maxDispatchesPerRun: z.number().default(10_000),
+    maxInFlightCalls: z.number().default(256),
+    maxQueuedCalls: z.number().default(4_096),
   })
 
   readonly language = 'typescript'
@@ -395,6 +408,10 @@ export class WorkerThreadCodeRuntime extends CodeRuntime {
     return new Promise<CodeRunResult>((resolve) => {
       let settled = false
       const answered = new Set<number>()
+      // FIX②: per-run dispatch accounting — caps and backpressure state.
+      let dispatchCount = 0
+      let inFlightCount = 0
+      const waitQueue: Array<() => void> = []
       const logs: string[] = []
       const strayLogs: string[] = []
       const output = new OutputLedger(this.config.maxOutputBytes)
@@ -465,28 +482,41 @@ export class WorkerThreadCodeRuntime extends CodeRuntime {
         // answered with a failure, and a binding throw/reject becomes the
         // program-side rejection — contained here, never a host crash.
         if (answered.has(message.id)) return
-        answered.add(message.id)
-        const reply = (payload: ReplyMessage): void => {
-          if (settled) return
-          // Canonical resolutions were snapshotted as lossless JSON before
-          // this point, so this payload is structured-cloneable by contract.
-          worker.postMessage(payload)
-        }
         const record = bindings.get(message.global)?.functions
         // Own-property lookup only: a forged name like 'constructor' or
         // 'hasOwnProperty' must not walk the record's prototype chain and
         // reach a callable the consumer never declared.
         const fn = record && Object.hasOwn(record, message.name) ? record[message.name] : undefined
+        // FIX②: the answered entry is dropped once the reply is posted, so the
+        // set tracks the in-flight window instead of growing for the whole run.
+        const reply = (payload: ReplyMessage): void => {
+          answered.delete(message.id)
+          if (settled) return
+          // Canonical resolutions were snapshotted as lossless JSON before
+          // this point, so this payload is structured-cloneable by contract.
+          worker.postMessage(payload)
+        }
         if (typeof fn !== 'function') {
+          answered.add(message.id)
           reply({ type: 'reply', id: message.id, ok: false, message: `unknown binding ${JSON.stringify(`${message.global}.${message.name}`)}` })
           return
         }
         const args = decodeWorkerJson(message.args)
         if (args === undefined) {
+          answered.add(message.id)
           reply({ type: 'reply', id: message.id, ok: false, message: 'binding arguments must be lossless JSON' })
           return
         }
-        void (async () => {
+        // FIX②: per-run dispatch cap — excess calls fail fast instead of
+        // accumulating host-side state without bound.
+        if (dispatchCount >= this.config.maxDispatchesPerRun) {
+          reply({ type: 'reply', id: message.id, ok: false, message: `per-run dispatch limit exceeded (${this.config.maxDispatchesPerRun})` })
+          return
+        }
+        dispatchCount++
+        answered.add(message.id)
+        const invoke = async (): Promise<void> => {
+          inFlightCount++
           try {
             const resolved = await fn(args)
             let value: CodeJsonValue | undefined
@@ -502,8 +532,22 @@ export class WorkerThreadCodeRuntime extends CodeRuntime {
             }
           } catch (error: unknown) {
             reply({ type: 'reply', id: message.id, ok: false, message: messageOf(error) })
+          } finally {
+            inFlightCount--
+            const next = waitQueue.shift()
+            if (next !== undefined) next()
           }
-        })()
+        }
+        // FIX②: in-flight backpressure — park on a bounded queue; fail fast beyond it.
+        if (inFlightCount >= this.config.maxInFlightCalls) {
+          if (waitQueue.length >= this.config.maxQueuedCalls) {
+            reply({ type: 'reply', id: message.id, ok: false, message: `in-flight binding call limit exceeded (${this.config.maxInFlightCalls} running, ${this.config.maxQueuedCalls} queued)` })
+            return
+          }
+          waitQueue.push(() => { void invoke() })
+          return
+        }
+        void invoke()
       }
 
       worker.on('message', (raw: unknown) => {

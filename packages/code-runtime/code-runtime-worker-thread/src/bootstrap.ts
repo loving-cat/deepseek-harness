@@ -194,15 +194,18 @@ function outputLimit(maxOutputBytes: number): Omit<DoneMessage, 'type'> {
   return { error: { kind: 'output-limit', message: `outer output exceeded ${maxOutputBytes} bytes` } }
 }
 
-/** Admit one bounded failure message or replace it with the fixed overflow diagnostic. */
+/** Admit one bounded failure message, keep its fitting PREFIX when oversized (FIX③), or fall back to the fixed overflow diagnostic. */
 function prepareFailure(
   kind: 'exception' | 'invalid-output',
   message: string,
   remainingOutputBytes: number,
   maxOutputBytes: number,
 ): Omit<DoneMessage, 'type'> {
-  if (jsonStringBytesUpTo(message, remainingOutputBytes) === undefined) return outputLimit(maxOutputBytes)
-  return { error: { kind, message } }
+  if (jsonStringBytesUpTo(message, remainingOutputBytes) !== undefined) return { error: { kind, message } }
+  // FIX③: same truncation policy as logs — the model keeps the real error's head.
+  const prefix = truncateJsonStringBytes(message, remainingOutputBytes)
+  if (prefix.length > 0) return { error: { kind, message: prefix } }
+  return outputLimit(maxOutputBytes)
 }
 
 /**
