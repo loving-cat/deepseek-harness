@@ -463,5 +463,36 @@ function feed(rig: Rig, text: string): void { rig.stdin.emit('data', Buffer.from
   check('clipboard write/read roundtrip', ok && back !== undefined && back.includes(probe))
 }
 
+// 32. diff rendering: color blocks (green add / red delete / dim context)
+{
+  const { renderDiff, renderDiffs, diffsFromMeta } = await import('../packages/bundle/tui/src/diff.ts')
+  const add = '\x1b[48;5;22m' // dark green block
+  const del = '\x1b[48;5;52m' // dark red block
+
+  // new-file create (oldText null): every line is an added green block
+  const created = renderDiff({ path: 'a.md', oldText: null, newText: 'one\ntwo' }, 40)
+  check('create header shows path', created[0]?.includes('a.md') === true)
+  check('create header stats +2', created[0]?.includes('+2') === true && created[0]?.includes('-') === false)
+  check('create lines all green blocks', created.slice(1).every(l => l.includes(add) && l.includes('+ ') && !l.includes(del)))
+  const plain = created[1]?.replace(/\x1b\[[0-9;]*m/g, '') ?? ''
+  check('create blocks span full width', plain.length >= 38)
+
+  // edit change: delete + insert + context
+  const edited = renderDiff({ path: 'b.md', oldText: 'ctx\nold line\nctx2', newText: 'ctx\nnew line\nctx2' }, 40)
+  check('edit header stats +1 -1', edited[0]?.includes('+1') === true && edited[0]?.includes('-1') === true)
+  const hasDel = edited.some(l => l.includes(del) && l.includes('- '))
+  const hasAdd = edited.some(l => l.includes(add) && l.includes('+ '))
+  check('edit has red delete block', hasDel)
+  check('edit has green add block', hasAdd)
+  const ctxLine = edited.find(l => l.includes('ctx') && !l.includes('old line') && !l.includes('new line'))
+  check('edit context dim, no block', ctxLine?.includes('\x1b[2m') === true && ctxLine?.includes(add) === false && ctxLine?.includes(del) === false)
+
+  // diffsFromMeta narrowing
+  check('meta diffs parsed', diffsFromMeta({ diffs: [{ path: 'x', oldText: 'a', newText: 'b' }] })?.[0]?.path === 'x')
+  check('meta bad shape rejected', diffsFromMeta({ diffs: 'nope' }) === undefined)
+  const multi = renderDiffs([{ path: 'a', oldText: null, newText: 'x' }], 20)
+  check('renderDiffs ends with blank row', multi.at(-1) === '')
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed === 0 ? 0 : 1)

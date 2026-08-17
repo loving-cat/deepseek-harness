@@ -249,7 +249,10 @@ function renderBlock(block: Block, width: number, expandTools: boolean): string[
     case 'assistant': {
       const out: string[] = []
       if (block.reasoning !== undefined && block.reasoning !== '') {
-        out.push(...wrapAnsi(ANSI.dim + renderInline(block.reasoning) + ANSI.reset, width))
+        // Muted light-gray italic thinking block (pi style), inline elements
+        // restore the gray base instead of dropping it.
+        const base = ANSI.gray + ANSI.italic
+        out.push(...wrapAnsi(base + renderInline(block.reasoning, base) + ANSI.reset, width))
         out.push('')
       }
       out.push(...renderMarkdown(block.text, width))
@@ -379,7 +382,7 @@ function plainFlush(state: TuiState): void {
     if (block.kind === 'assistant') {
       const reasoning = block.reasoning ?? ''
       if (cursor.reasoning < reasoning.length) {
-        write(ANSI.dim + reasoning.slice(cursor.reasoning) + ANSI.reset)
+        write(ANSI.gray + ANSI.italic + reasoning.slice(cursor.reasoning) + ANSI.reset)
         cursor.reasoning = reasoning.length
       }
       if (cursor.text < block.text.length) {

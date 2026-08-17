@@ -94,7 +94,9 @@ export function applyWriteTool(ctx: Context, sandbox: FsSandboxController): void
       render: (_args, value) => [{ type: 'text', text: formatWriteOutput(value.path, value) }],
       presentationMeta: (args, value) => ({
         diffs: value.before === null
-          ? []
+          // New-file create: present the whole content as an all-added diff
+          // (oldText null = nothing to diff against) so UIs can show a green block.
+          ? [{ path: args.file_path, oldText: null, newText: value.after }]
           : computeHunkDiffs(args.file_path, value.before, value.after)
             .map(({ path, oldText, newText }) => ({ path, oldText, newText })),
       }),

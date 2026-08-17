@@ -15,8 +15,15 @@ import { ANSI, ansiLength, truncateAnsi, wrapAnsi } from './term.ts'
 
 const BACKTICK = String.fromCharCode(96)
 
-/** Render inline markdown (code, bold, italic, strikethrough, links) to ANSI. */
-export function renderInline(text: string): string {
+/**
+ * Render inline markdown (code, bold, italic, strikethrough, links) to ANSI.
+ * When `base` is given (e.g. the dim/gray reasoning style), inline elements
+ * restore that base instead of a full reset, so wrapped content stays muted.
+ */
+export function renderInline(text: string, base = ''): string {
+  // Inside a base style, after an inline element restore reset+base (not a
+  // plain reset, which would drop the muted styling for the rest of the text).
+  const R = base === '' ? ANSI.reset : ANSI.reset + base
   let out = ''
   let i = 0
   while (i < text.length) {
@@ -24,29 +31,29 @@ export function renderInline(text: string): string {
     if (ch === BACKTICK) {
       const end = text.indexOf(BACKTICK, i + 1)
       if (end === -1) { out += ch; i += 1; continue }
-      out += ANSI.cyan + text.slice(i + 1, end) + ANSI.reset
+      out += ANSI.cyan + text.slice(i + 1, end) + R
       i = end + 1
     } else if (ch === '*' && text[i + 1] === '*') {
       const end = text.indexOf('**', i + 2)
       if (end === -1) { out += '**'; i += 2; continue }
-      out += ANSI.bold + renderInline(text.slice(i + 2, end)) + ANSI.reset
+      out += ANSI.bold + renderInline(text.slice(i + 2, end), base) + R
       i = end + 2
     } else if (ch === '~' && text[i + 1] === '~') {
       const end = text.indexOf('~~', i + 2)
       if (end === -1) { out += '~~'; i += 2; continue }
-      out += '\x1b[9m' + renderInline(text.slice(i + 2, end)) + ANSI.reset
+      out += '\x1b[9m' + renderInline(text.slice(i + 2, end), base) + R
       i = end + 2
     } else if (ch === '[') {
       const close = text.indexOf('](', i + 1)
       if (close === -1) { out += ch; i += 1; continue }
       const urlEnd = text.indexOf(')', close + 2)
       if (urlEnd === -1) { out += ch; i += 1; continue }
-      out += ANSI.underline + ANSI.blue + renderInline(text.slice(i + 1, close)) + ANSI.reset
+      out += ANSI.underline + ANSI.blue + renderInline(text.slice(i + 1, close), base) + R
       i = urlEnd + 1
     } else if (ch === '*') {
       const end = text.indexOf('*', i + 1)
       if (end === -1) { out += ch; i += 1; continue }
-      out += ANSI.italic + renderInline(text.slice(i + 1, end)) + ANSI.reset
+      out += ANSI.italic + renderInline(text.slice(i + 1, end), base) + R
       i = end + 1
     } else {
       out += ch
@@ -453,11 +460,12 @@ export function renderMarkdown(text: string, width: number): string[] {
       continue
     }
 
-    const ol = /^(\s*)\d+[.)]\s+(.*)$/.exec(line)
+    const ol = /^(\s*)(\d+[.)])\s+(.*)$/.exec(line)
     if (ol !== null) {
       flushParagraph()
       const indent = ' '.repeat((ol[1] ?? '').length)
-      out.push(...wrapAnsi(indent + ANSI.brightGreen + renderInline(ol[2] ?? '') + ANSI.reset, width))
+      // number marker green, content in default color (mirrors the bullet list)
+      out.push(...wrapAnsi(indent + ANSI.brightGreen + (ol[2] ?? '') + ANSI.reset + ' ' + renderInline(ol[3] ?? ''), width))
       continue
     }
 

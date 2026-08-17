@@ -7,7 +7,7 @@
  * @module @deepseek-ai/dsh-tui/diff
  */
 
-import { ANSI } from './term.ts'
+import { ANSI, charWidth } from './term.ts'
 
 /** Structural mirror of dsh-tools FileDiff (imported structurally to avoid a new dependency). */
 export interface FileDiff {
@@ -79,6 +79,17 @@ function diffLines(oldLines: string[], newLines: string[]): DiffOp[] {
   return ops
 }
 
+/** Dark color-block backgrounds (pi/GitHub style) for added/removed rows. */
+const BG_ADD = '\x1b[48;5;22m' // dark green
+const BG_DEL = '\x1b[48;5;52m' // dark red
+
+/** Visible column width of a plain (ANSI-free) line. */
+function visibleWidth(s: string): number {
+  let w = 0
+  for (const ch of s) w += charWidth(ch)
+  return w
+}
+
 /** Render one file diff to styled lines (code stays verbatim, clipped to width). */
 export function renderDiff(diff: FileDiff, width: number): string[] {
   const inner = Math.max(1, width - 2)
@@ -96,9 +107,16 @@ export function renderDiff(diff: FileDiff, width: number): string[] {
   stats += ANSI.reset
   out.push(header + stats)
   for (const op of ops) {
-    if (op.type === 'equal') out.push(ANSI.dim + '  ' + clip(op.line) + ANSI.reset)
-    else if (op.type === 'delete') out.push(ANSI.red + '- ' + clip(op.line) + ANSI.reset)
-    else out.push(ANSI.green + '+ ' + clip(op.line) + ANSI.reset)
+    if (op.type === 'equal') {
+      out.push(ANSI.dim + '  ' + clip(op.line) + ANSI.reset)
+    } else if (op.type === 'delete') {
+      const line = '- ' + clip(op.line)
+      // full-row dark red block: background spans the whole line width
+      out.push(BG_DEL + ANSI.red + line + ' '.repeat(Math.max(0, inner - visibleWidth(line))) + ANSI.reset)
+    } else {
+      const line = '+ ' + clip(op.line)
+      out.push(BG_ADD + ANSI.green + line + ' '.repeat(Math.max(0, inner - visibleWidth(line))) + ANSI.reset)
+    }
   }
   return out
 }
