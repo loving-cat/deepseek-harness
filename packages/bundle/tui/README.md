@@ -27,7 +27,7 @@ Slash commands: `/help`, `/model`, `/preset`, `/fork [turn]`, `/new`, `/copy`, `
 - **`/model`** prints the current selection and every configurable provider's catalog. **`/model <provider> <model> [off|high|max]`** mutates the live agent's `ModelSelectionRef` (the next step that enters prompt assembly picks it up) and persists the choice through `ctx.agentDefaultModel.saveSelection()`, so future sessions default to it. `/model <model>` keeps the current provider.
 - **`/preset`** lists the roster (shipped: `standard`, `code` = PTC 模式, `minimal` = 极简模式, `cordis` = Creator mode, plus user presets under `$DSH_HOME/.agent-presets`). **`/preset <id>`** re-links the blank agent via `ctx.agentPresets.recompose()` and records the durable `agent-preset/selected` event — valid only before the session's first message, after which the preset is fixed (start a new session with `--preset <id>` instead). The roster row mirrors the Web bundle (`default: standard`); agent creation mirrors the Web host: resolve before the session exists, `mount()` inside an async `setup` so failures roll creation back.
 
-Model and credentials come from the shared Harness home (`$DSH_HOME/settings.yaml`, `$DSH_HOME/.credentials.yaml`), same as the Web profile; `DEEPSEEK_API_KEY` in the environment also works. The default route is `deepseek-official / deepseek-v4-flash` unless settings override it.
+Model and credentials come from the shared Harness home (`$DSH_HOME/settings.yaml`, `$DSH_HOME/.credentials.yaml`), same as the Web profile; `DEEPSEEK_API_KEY` in the environment also works. The default route is `deepseek-official / deepseek-v4-flash-0731` unless settings override it.
 
 ## Model Experience
 

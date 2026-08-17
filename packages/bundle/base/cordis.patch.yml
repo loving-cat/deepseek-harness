@@ -64,7 +64,7 @@
       name: '@deepseek-ai/dsh-agent-default-model'
       config:
         provider: deepseek-official
-        model: deepseek-v4-flash
+        model: deepseek-v4-flash-0731
 
     - id: jobs
       name: '@deepseek-ai/dsh-jobs-local'

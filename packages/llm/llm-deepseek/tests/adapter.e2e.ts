@@ -16,7 +16,7 @@ import { assemble, type AssembledResult } from './assemble.ts'
  * entirely without $DEEPSEEK_API_KEY (see vitest.e2e.config.ts).
  */
 
-const FLASH = 'deepseek-v4-flash'
+const FLASH = 'deepseek-v4-flash-0731'
 const PRO = 'deepseek-v4-pro-0813'
 const contexts: Context[] = []
 let identityHome: string

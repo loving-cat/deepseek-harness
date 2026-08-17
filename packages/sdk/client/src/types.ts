@@ -52,7 +52,7 @@ export interface DeepSeekHarnessOptions {
   cwd?: string
   /** Provider route for SDK-created agents (default `deepseek-official`). */
   provider?: string
-  /** Model for SDK-created agents (default `deepseek-v4-flash`). */
+  /** Model for SDK-created agents (default `deepseek-v4-flash-0731`). */
   model?: string
   /** Maximum output tokens for each conversation-model request. */
   maxTokens?: number

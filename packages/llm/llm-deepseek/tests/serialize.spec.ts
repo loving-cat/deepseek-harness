@@ -5,7 +5,7 @@ import type { ContentBlock, GenerateOptions, Message } from '@deepseek-ai/dsh-ll
 import { serializeMessages, serializeRequest } from '../src/serialize.ts'
 
 function request(overrides: Partial<GenerateOptions> = {}): GenerateOptions {
-  return { provider: 'deepseek-official', model: 'deepseek-v4-flash', messages: [], ...overrides }
+  return { provider: 'deepseek-official', model: 'deepseek-v4-flash-0731', messages: [], ...overrides }
 }
 
 describe('serializeMessages', () => {
@@ -164,7 +164,7 @@ describe('serializeRequest', () => {
   it('always streams with usage and maps the basics', () => {
     const wire = serializeRequest(request({ messages: history }))
     expect(wire).toEqual({
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-flash-0731',
       messages: [{ role: 'user', content: 'hi' }],
       stream: true,
       stream_options: { include_usage: true },

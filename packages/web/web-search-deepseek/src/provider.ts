@@ -35,7 +35,7 @@ export const DEEPSEEK_PROVIDER_ID = 'deepseek-official'
 export const DEEPSEEK_DEFAULT_BASE_URL = 'https://api.deepseek.com/anthropic/v1'
 
 /** Default Anthropic-format model name (aligned with the repo's DeepSeek model vocabulary). */
-export const DEEPSEEK_DEFAULT_MODEL = 'deepseek-v4-flash'
+export const DEEPSEEK_DEFAULT_MODEL = 'deepseek-v4-flash-0731'
 
 /** Default `anthropic-version` header value. */
 export const DEEPSEEK_DEFAULT_API_VERSION = '2023-06-01'

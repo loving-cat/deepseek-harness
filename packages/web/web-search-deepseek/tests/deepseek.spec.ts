@@ -472,7 +472,7 @@ describe('web-search-deepseek plugin registration', () => {
       const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
       expect(url).toBe('https://api.deepseek.com/anthropic/v1/messages')
       expect((init.headers as Record<string, string>)['x-api-key']).toBe('env-key')
-      expect(JSON.parse(init.body as string)).toMatchObject({ model: 'deepseek-v4-flash' })
+      expect(JSON.parse(init.body as string)).toMatchObject({ model: 'deepseek-v4-flash-0731' })
       await ctx.fiber.dispose()
     } finally {
       if (prev === undefined) delete process.env.DEEPSEEK_API_KEY
