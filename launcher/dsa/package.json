@@ -1,0 +1,9 @@
+{
+  "name": "dsa-launcher",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Global `dsa` terminal launcher for the local deepseek-harness tui profile (D:/deepseek-harness)",
+  "bin": {
+    "dsa": "bin/dsa.js"
+  }
+}
