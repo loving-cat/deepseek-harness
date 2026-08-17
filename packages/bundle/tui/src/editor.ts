@@ -59,6 +59,8 @@ export interface EditorCallbacks {
   onSuggestFiles?(prefix: string): readonly SuggestItem[]
   /** Ctrl+O: toggle full tool-output rendering (caller owns the flag). */
   onToggleExpand?(): void
+  /** Shift+Tab: cycle the reasoning effort (caller owns the selection). */
+  onShiftTab?(): void
   /** Alt+Up: recall queued follow-ups into the editor (caller owns the queue). */
   onRecallPending?(): void
   /** SGR mouse press (only delivered while the dropdown is open): 1-based col/row. */
@@ -514,6 +516,8 @@ export class LineEditor {
       case '\x1b[201~': this.pasting = false; return
       // Shift+Enter: Kitty CSI-u (main + keypad) and modifyOtherKeys.
       case '\x1b[13;2u': case '\x1b[57414;2u': case '\x1b[27;2;13~': this.insert('\n'); return
+      // Shift+Tab: plain reverse-tab CSI and modifyOtherKeys (shift+tab 9).
+      case '\x1b[Z': case '\x1b[27;2;9~': this.callbacks.onShiftTab?.(); return
       case '\x1b[A':
         if (this.suggest !== undefined) { this.moveSuggest(-1); return }
         this.historyUp(); return

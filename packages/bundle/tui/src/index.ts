@@ -102,6 +102,8 @@ interface TuiState {
   quitting: boolean
   selectionRef: ModelSelectionRef | undefined
   presetId: string | undefined
+  /** Display name of the active agent preset (for the status bar), undefined until resolved. */
+  presetName: string | undefined
   term: Term | undefined
   editor: LineEditor | undefined
   prompt: PendingPrompt | undefined
@@ -152,6 +154,7 @@ const SLASH_COMMANDS: readonly SuggestItem[] = [
   { value: 'help', description: 'show the command help' },
   { value: 'model', description: 'show or switch the model — /model <provider> <model> [effort]' },
   { value: 'preset', description: 'list presets, or switch before the first message — /preset <id>' },
+  { value: 'mode', description: 'cycle modes (标准/极简/创造…) — /mode switches to the next preset' },
   { value: 'fork', description: 'branch this session — /fork [turn] rewinds to that turn' },
   { value: 'new', description: 'start a fresh session alongside this one' },
   { value: 'copy', description: 'copy the last reply to the clipboard (Ctrl+X)' },
@@ -301,7 +304,7 @@ function buildStatus(state: TuiState, width: number): string {
   }
   const todos = view === undefined || view.todos.length === 0 ? '' : ' · ' + ANSI.brightMagenta + '☑ ' + String(view.todos.filter(t => t.status === 'completed').length) + '/' + String(view.todos.length) + ANSI.reset
   const sessions = state.views.size > 1 ? ' · ' + ANSI.dim + '⇄ ' + String(state.views.size) + ' sessions' + ANSI.reset : ''
-  const preset = state.presetId === undefined ? '' : ' · preset ' + state.presetId
+  const preset = state.presetId === undefined ? '' : ' · ' + ANSI.brightCyan + (state.presetName ?? state.presetId) + ANSI.reset
   // Greedily keep segments by priority: activity > sessions > todos > stats > preset.
   let out = ANSI.bold + 'dsh tui' + ANSI.reset + ' ' + ANSI.dim + model + ANSI.reset + ' ' + activity
   for (const seg of [sessions, todos, stats === '' ? '' : ANSI.dim + stats + ANSI.reset, preset]) {
@@ -692,6 +695,8 @@ const HELP_TEXT = [
   '  /model <provider> <model> [effort]   switch model (effort: off | high | max); /model <model> keeps the provider',
   '  /preset                        list agent presets (standard, code, minimal, cordis)',
   '  /preset <id>                   switch preset — only before the session\'s first message',
+  '  /mode                          cycle to the next mode (标准 → PTC → 极简 → 创造) — blank session only',
+  '  Shift+Tab                      cycle reasoning effort (high → max → off → high)',
   '  /fork [turn]                   branch into a child session and switch to it; [turn] rewinds to that turn',
   '  /new                           start a fresh session alongside this one',
   '  /bell                          toggle the turn-end bell',
@@ -763,6 +768,26 @@ function switchModel(ctx: Context, state: TuiState, write: (text: string) => voi
   applySwitch()
 }
 
+/** Shift+Tab: cycle the reasoning effort (high → max → off → high), keeping provider/model. */
+function cycleEffort(ctx: Context, state: TuiState, write: (text: string) => void): void {
+  const ref = state.selectionRef
+  const current = ref?.current
+  if (ref === undefined || current === undefined) { write('dsh: no model selection to cycle effort on'); return }
+  // Cycle order is high → max → off so a fresh (unset) selection boosts to
+  // high first; off lands on the next press, then loops back to high.
+  const cycle = ['high', 'max', 'off'] as const
+  const cur = current.reasoningEffort
+  const idx = cur === undefined ? -1 : cycle.indexOf(cur as (typeof cycle)[number])
+  const next = cycle[(idx + 1) % cycle.length]
+  if (next === undefined) return
+  const updated: ModelSelection = { provider: current.provider, model: current.model, reasoningEffort: next as ReasoningEffortId }
+  ref.current = updated
+  void ctx.get('agentDefaultModel')?.saveSelection(updated).catch((error: unknown) => {
+    write('dsh: saving default failed: ' + (error instanceof Error ? error.message : String(error)))
+  })
+  write('effort → ' + next + (next === 'off' ? ' (reasoning disabled)' : ''))
+}
+
 /** /preset with no argument: roster with the current preset marked. */
 async function showPresets(ctx: Context, state: TuiState, write: (text: string) => void): Promise<void> {
   const presets = ctx.get('agentPresets')
@@ -790,10 +815,46 @@ async function switchPreset(ctx: Context, state: TuiState, write: (text: string)
     const mounted = await presets.recompose(view.agent.ctx, id)
     view.agent.session.append('agent-preset/selected', { agentPreset: mounted.id })
     state.presetId = mounted.id
+    state.presetName = mounted.name
     write('preset → ' + mounted.id + (mounted.name === undefined ? '' : ' — ' + mounted.name))
   } catch (error: unknown) {
     write('dsh: ' + (error instanceof Error ? error.message : String(error)))
   }
+}
+
+/** /mode: cycle to the next agent preset (standard → PTC → 极简 → 创造, by order). */
+async function cycleMode(ctx: Context, state: TuiState, write: (text: string) => void): Promise<void> {
+  const presets = ctx.get('agentPresets')
+  const view = currentView(state)
+  if (presets === undefined || view === undefined) { write('no preset roster composed'); return }
+  const started = view.agent.session.events.some(event => event.type === 'user/message')
+  if (started) {
+    write(ANSI.yellow + 'the mode is fixed once the session has messages — /new to start a fresh session, then /mode' + ANSI.reset)
+    return
+  }
+  const list = await presets.list()
+  const ordered = [...list].sort((a, b) => ((a.order ?? 99) - (b.order ?? 99)))
+  const currentId = state.presetId ?? presets.defaultId
+  const startIdx = ordered.findIndex(p => p.id === currentId)
+  // Walk the roster from the next preset; skip any that fail to mount (a
+  // broken preset must not wedge the cycle — report and keep looking).
+  let lastError: unknown
+  for (let step = 1; step <= ordered.length; step += 1) {
+    const next = ordered[(startIdx + step) % ordered.length]
+    if (next === undefined) break
+    try {
+      const mounted = await presets.recompose(view.agent.ctx, next.id)
+      view.agent.session.append('agent-preset/selected', { agentPreset: mounted.id })
+      state.presetId = mounted.id
+      state.presetName = mounted.name
+      write('mode → ' + (mounted.name ?? mounted.id) + (mounted.description === undefined ? '' : ' — ' + mounted.description))
+      return
+    } catch (error: unknown) {
+      lastError = error
+      write(ANSI.yellow + 'mode: ' + next.id + ' failed to mount, skipping' + ANSI.reset)
+    }
+  }
+  write('dsh: ' + (lastError instanceof Error ? lastError.message : String(lastError)))
 }
 
 /** Handle a slash command, returning true when consumed. */
@@ -803,6 +864,7 @@ async function handleCommand(ctx: Context, state: TuiState, write: (text: string
   if (text.startsWith('/model ')) { switchModel(ctx, state, write, text.slice('/model '.length)); return true }
   if (text === '/preset') { await showPresets(ctx, state, write); return true }
   if (text.startsWith('/preset ')) { await switchPreset(ctx, state, write, text.slice('/preset '.length)); return true }
+  if (text === '/mode') { await cycleMode(ctx, state, write); return true }
   if (text === '/bell') { state.bell = !state.bell; write('turn-end bell: ' + (state.bell ? 'on' : 'off')); return true }
   if (text === '/copy') { copyLastReply(state, write); return true }
   return false
@@ -862,6 +924,7 @@ async function run(ctx: Context, config: Config, io: TuiIo, state: TuiState, thr
     setup = async (agentCtx) => { installModelSelection(agentCtx, selectionRef); await presets.mount(agentCtx, resolvedId) }
   }
   state.presetId = agentPreset
+  state.presetName = undefined // resolved lazily by the first /preset | /mode roster read
 
   const agentOptions = { provider: selection.provider, model: selection.model }
   const meta = { cwd: process.cwd(), ...(agentPreset === undefined ? {} : { agentPreset }) }
@@ -1180,6 +1243,9 @@ function runFullScreen(
       state.expandTools = !state.expandTools
       addSystem(state, state.expandTools ? 'tool output: expanded (Ctrl+O collapses)' : 'tool output: collapsed', throttle)
     },
+    onShiftTab() {
+      cycleEffort(ctx, state, (t) => { addSystem(state, t, throttle) })
+    },
     onRecallPending() {
       const target = currentView(state)
       if (target === undefined || state.prompt !== undefined || target.pending.length === 0) return
@@ -1255,7 +1321,7 @@ export function apply(ctx: Context, config: Config): void {
   const io: TuiIo = { stdout: process.stdout, stderr: process.stderr, exit }
   const state: TuiState = {
     views: new Map(), current: undefined, quitting: false,
-    selectionRef: undefined, presetId: undefined, term: undefined,
+    selectionRef: undefined, presetId: undefined, presetName: undefined, term: undefined,
     editor: undefined, prompt: undefined,
     plainOut: undefined, plainCursor: { block: 0, reasoning: 0, text: 0 },
     spinnerTimer: undefined, spinnerFrame: 0, expandTools: false, bell: true, contextWindow: undefined,

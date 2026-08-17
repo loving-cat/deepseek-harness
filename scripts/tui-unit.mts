@@ -61,6 +61,24 @@ function feed(rig: Rig, text: string): void { rig.stdin.emit('data', Buffer.from
   check('negotiation response not inserted as text', !rig.editor.value.includes('[?'))
 }
 
+// 2b. shift+tab fires onShiftTab (plain CSI reverse-tab + modifyOtherKeys)
+{
+  let hits = 0
+  const stdin = Object.assign(new EventEmitter(), { isTTY: false, resume() {}, pause() {} })
+  const written: string[] = []
+  const stdout = { write(chunk: string) { written.push(chunk); return true } }
+  const editor = new LineEditor({
+    onSubmit() {}, onInterrupt() {}, onEof() {}, onChange() {}, onShiftTab: () => { hits++ },
+  }, stdin as never, stdout)
+  editor.start()
+  feed({ editor, stdin: stdin as never, written, submitted: [] }, '\x1b[Z')
+  check('CSI Z fires onShiftTab', hits === 1)
+  feed({ editor, stdin: stdin as never, written, submitted: [] }, '\x1b[27;2;9~')
+  check('modifyOtherKeys shift+tab fires onShiftTab', hits === 2)
+  feed({ editor, stdin: stdin as never, written, submitted: [] }, '\x1b[C') // plain arrow: no shift-tab
+  check('plain escape does not fire onShiftTab', hits === 2)
+}
+
 // 3. modifyOtherKeys fallback (flags=0 answer, then DA)
 {
   const rig = makeEditor()
