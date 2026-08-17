@@ -56,10 +56,34 @@ export async function writeFileAtomic(filename: string, content: string, options
   const temp = `${filename}.${randomBytes(6).toString('hex')}.tmp`
   try {
     await writeFile(temp, content, { mode: options.mode, flag: 'wx' })
-    await rename(temp, filename)
+    await renameWithRetry(temp, filename)
   } catch (error) {
     await rm(temp, { force: true })
     throw error
+  }
+}
+
+/**
+ * Retry-backs: a replace of an existing file on Windows returns EPERM (or
+ * EBUSY/EACCES) when the destination handle is momentarily held — scanning
+ * antivirus, the search indexer, or a watcher settling after a prior write.
+ * The temp sibling is exclusive to this call, so only the destination can
+ * fail the replacement; a short bounded wait almost always clears it. Other
+ * codes (or exhaustion) rethrow unchanged.
+ */
+async function renameWithRetry(temp: string, filename: string): Promise<void> {
+  const delays = [50, 100, 200, 400]
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(temp, filename)
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | null)?.code
+      const transient = code === 'EPERM' || code === 'EBUSY' || code === 'EACCES'
+      const delay = delays[attempt]
+      if (!transient || delay === undefined) throw error
+      await new Promise(resolve => setTimeout(resolve, delay))
+    }
   }
 }
 
