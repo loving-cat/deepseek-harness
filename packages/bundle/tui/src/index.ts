@@ -25,7 +25,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { TodoItem } from '@deepseek-ai/dsh-session'
-import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
+import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import type { AskUserQuestionAnswer, AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-cmdline'
@@ -34,7 +34,7 @@ import { ANSI, Term, ansiLength, truncateAnsi, wrapAnsi, wrappedCursor } from '.
 import { renderInline, renderMarkdown } from './markdown.ts'
 import { diffsFromMeta, renderDiffs, type FileDiff } from './diff.ts'
 import { readClipboardImage, readClipboardText, writeClipboardText } from './clipboard.ts'
-import { addUsage, billedInput, emptyUsage, formatTokens, type UsageTotals } from './usage.ts'
+import { addUsage, billedInput, emptyUsage, formatTokens, type TokenUsageLike, type UsageTotals } from './usage.ts'
 import { scanFiles } from './files.ts'
 import { LineEditor, type SuggestItem } from './editor.ts'
 
@@ -66,10 +66,26 @@ type Block =
   | { kind: 'tool'; name: string; args: string; callId: string; diffs?: FileDiff[]; summary?: string }
   | { kind: 'system'; text: string }
 
-/** An inline prompt awaiting one line of input (approval / user question). */
+/** One selectable row of a modal picker menu. */
+interface MenuItem {
+  value: string
+  text: string
+}
+
+/** Navigable modal picker state attached to a pending prompt. */
+interface PendingMenu {
+  title: string
+  items: readonly MenuItem[]
+  index: number
+  footer: string
+}
+
+/** An inline prompt awaiting one line of input (approval / user question / picker). */
 interface PendingPrompt {
   label: string
   resolve: (answer: string) => void
+  /** Present when the prompt doubles as an arrow-navigable picker menu. */
+  menu: PendingMenu | undefined
 }
 
 /** A live session's rendered view: the agent handle plus its transcript state. */
@@ -87,6 +103,8 @@ interface SessionView {
   usage: UsageTotals
   /** Billed tokens of the currently running (or last) turn. */
   turnUsage: UsageTotals
+  /** Live usage snapshot from the current chunk stream (undefined once settled). */
+  streamUsage: TokenUsageLike | undefined
   /** Last step's total input tokens (drives the context-occupancy readout). */
   lastInputTokens: number | undefined
   /** Epoch ms when the current turn started (drives the elapsed readout). */
@@ -128,6 +146,8 @@ interface TuiState {
   modelArgsCache: Map<string, readonly SuggestItem[]>
   /** '/preset' arg cache (filled asynchronously). */
   presetArgsCache: readonly SuggestItem[] | undefined
+  /** Sessions whose approvals auto-allow (the user chose 'a' at a prompt). */
+  autoApprove: Set<string>
 }
 
 /** Process-facing effects. */
@@ -158,6 +178,7 @@ const SLASH_COMMANDS: readonly SuggestItem[] = [
   { value: 'fork', description: 'branch this session — /fork [turn] rewinds to that turn' },
   { value: 'new', description: 'start a fresh session alongside this one' },
   { value: 'copy', description: 'copy the last reply to the clipboard (Ctrl+X)' },
+  { value: 'auto', description: 'toggle auto-approve for this session' },
   { value: 'bell', description: 'toggle the turn-end bell' },
   { value: 'sessions', description: 'switch between live sessions or resume a persisted one' },
   { value: 'exit', description: 'flush the session and quit' },
@@ -186,7 +207,8 @@ function currentView(state: TuiState): SessionView | undefined {
 function addView(state: TuiState, agent: Agent, handle: { dispose(): Promise<void> }): SessionView {
   const view: SessionView = {
     agent, handle, blocks: [], busy: false, scroll: 0, todos: [], openAssistant: undefined,
-    pending: [], usage: emptyUsage(), turnUsage: emptyUsage(), lastInputTokens: undefined, turnStartedAt: undefined,
+    pending: [], usage: emptyUsage(), turnUsage: emptyUsage(), streamUsage: undefined,
+    lastInputTokens: undefined, turnStartedAt: undefined,
   }
   const key = String(agent.session.id)
   state.views.set(key, view)
@@ -302,12 +324,13 @@ function buildStatus(state: TuiState, width: number): string {
     activity = ANSI.dim + ' ○ idle' + ANSI.reset
     stats = totals + ctxPct
   }
+  const auto = state.current !== undefined && state.autoApprove.has(state.current) ? ' · ' + ANSI.brightGreen + 'auto' + ANSI.reset : ''
   const todos = view === undefined || view.todos.length === 0 ? '' : ' · ' + ANSI.brightMagenta + '☑ ' + String(view.todos.filter(t => t.status === 'completed').length) + '/' + String(view.todos.length) + ANSI.reset
   const sessions = state.views.size > 1 ? ' · ' + ANSI.dim + '⇄ ' + String(state.views.size) + ' sessions' + ANSI.reset : ''
   const preset = state.presetId === undefined ? '' : ' · ' + ANSI.brightCyan + (state.presetName ?? state.presetId) + ANSI.reset
   // Greedily keep segments by priority: activity > sessions > todos > stats > preset.
   let out = ANSI.bold + 'dsh tui' + ANSI.reset + ' ' + ANSI.dim + model + ANSI.reset + ' ' + activity
-  for (const seg of [sessions, todos, stats === '' ? '' : ANSI.dim + stats + ANSI.reset, preset]) {
+  for (const seg of [sessions, auto, todos, stats === '' ? '' : ANSI.dim + stats + ANSI.reset, preset]) {
     if (seg !== '' && ansiLength(out + seg) <= width) out += seg
   }
   return out
@@ -500,12 +523,52 @@ function openExternalEditor(state: TuiState, throttle: Throttle): void {
 /** Ask one line of input through the modal prompt. */
 function askUser(state: TuiState, label: string): Promise<string> {
   return new Promise((resolve) => {
-    state.prompt = { label, resolve }
+    state.prompt = { label, resolve, menu: undefined }
     // A modal prompt owns the input: no slash-command dropdown on top of it.
     if (state.editor !== undefined) state.editor.suggestEnabled = false
     state.editor?.reset()
     state.term?.render(renderFrame(state))
   })
+}
+
+/** Render a picker menu into a prompt label with the highlighted row marked. */
+function menuLabel(menu: PendingMenu): string {
+  let out = ANSI.bold + menu.title + ANSI.reset + '\n'
+  menu.items.forEach((item, i) => {
+    out += i === menu.index
+      ? ANSI.brightCyan + '❯ ' + ANSI.bold + item.text + ANSI.reset + '\n'
+      : '  ' + ANSI.dim + item.text + ANSI.reset + '\n'
+  })
+  out += ANSI.dim + menu.footer + ANSI.reset
+  return out
+}
+
+/**
+ * Ask one of several choices through an arrow-navigable modal menu. The
+ * highlighted item's value is returned on an empty Enter; typing a value (or
+ * a number, or '0') still works exactly like the previous plain prompt.
+ */
+function askUserMenu(state: TuiState, menu: PendingMenu): Promise<string> {
+  return new Promise((resolve) => {
+    state.prompt = { label: menuLabel(menu), resolve, menu }
+    // A modal prompt owns the input: no slash-command dropdown on top of it.
+    if (state.editor !== undefined) state.editor.suggestEnabled = false
+    state.editor?.reset()
+    state.term?.render(renderFrame(state))
+  })
+}
+
+/** Move the open prompt menu's highlight by ±1 (wrapping); true = key consumed. */
+function navigatePromptMenu(state: TuiState, delta: -1 | 1): boolean {
+  const prompt = state.prompt
+  if (prompt === undefined) return false
+  const menu = prompt.menu
+  if (menu === undefined || menu.items.length === 0) return false
+  const n = menu.items.length
+  menu.index = ((menu.index + delta) % n + n) % n
+  prompt.label = menuLabel(menu)
+  state.term?.render(renderFrame(state))
+  return true
 }
 
 /**
@@ -518,7 +581,7 @@ function askUser(state: TuiState, label: string): Promise<string> {
  */
 function askUserDeferred(state: TuiState, label: Promise<string>): Promise<string> {
   return new Promise((resolve) => {
-    state.prompt = { label: '', resolve }
+    state.prompt = { label: '', resolve, menu: undefined }
     // A modal prompt owns the input: no slash-command dropdown on top of it.
     if (state.editor !== undefined) state.editor.suggestEnabled = false
     state.editor?.reset()
@@ -602,19 +665,35 @@ function replayHistory(view: SessionView): void {
   }
 }
 
-/** Answer one approval request inline. */
-async function answerApproval(state: TuiState, req: { toolName: string; reason?: string; signal?: AbortSignal }): Promise<ApprovalOutcome> {
+/** Answer one approval request inline, labelled with its owning session. */
+async function answerApproval(state: TuiState, req: ApprovalRequest): Promise<ApprovalOutcome> {
   if (state.quitting) return 'unavailable'
   if (req.signal?.aborted) return 'cancelled'
+  const ownerKey = String(req.agent.session.id)
+  // The user already chose auto-allow for this session: answer without asking.
+  if (state.autoApprove.has(ownerKey)) return 'allowed-once'
   const reason = req.reason === undefined ? '' : ANSI.dim + '  ' + req.reason + ANSI.reset + '\n'
-  const question = ANSI.brightYellow + '⚠ approve ' + ANSI.bold + req.toolName + ANSI.reset + ANSI.brightYellow + '?' + ANSI.reset + '\n' + reason + ANSI.dim + '[y] allow once / [Enter] reject' + ANSI.reset
+  // Route attribution: the answerer is global, but the question belongs to one
+  // agent. When that agent's view is not on screen the label still says whose
+  // ask this is (sub-agent approvals would otherwise look like the current
+  // session's own ask).
+  const ownerTag = ownerKey === state.current ? '' : ANSI.dim + '  [agent #' + ownerKey.slice(-6) + ']' + ANSI.reset + '\n'
+  const question = ANSI.brightYellow + '⚠ approve ' + ANSI.bold + req.toolName + ANSI.reset + ANSI.brightYellow + '?' + ANSI.reset + '\n' + ownerTag + reason + ANSI.dim + '[y] allow once / [a] always allow this session / [Enter] reject' + ANSI.reset
   const answerPromise = askUser(state, question + ': ').then(a => a.trim().toLowerCase())
   const signal = req.signal
   const cancelled = signal === undefined ? undefined : new Promise<'cancelled'>((resolve) => { signal.addEventListener('abort', () => { resolve('cancelled') }, { once: true }) })
   const answer = cancelled === undefined ? await answerPromise : await Promise.race([answerPromise, cancelled])
   state.prompt = undefined
   if (answer === 'cancelled') return 'cancelled'
-  return answer === 'y' ? 'allowed-once' : 'rejected'
+  if (answer === 'y') return 'allowed-once'
+  if (answer === 'a') {
+    state.autoApprove.add(ownerKey)
+    const view = currentView(state)
+    view?.blocks.push({ kind: 'system', text: 'auto-approve on for this session — future approval prompts are allowed automatically (/auto toggles)' })
+    state.term?.render(renderFrame(state))
+    return 'allowed-once'
+  }
+  return 'rejected'
 }
 
 /** Answer a batch of user questions inline. */
@@ -695,14 +774,20 @@ async function pickResume(ctx: Context, state: TuiState, throttle: Throttle): Pr
     return undefined
   }
   const max = Math.min(20, records.length)
-  let menu = ANSI.bold + 'resume a session' + ANSI.reset + '\n'
-  records.slice(0, max).forEach((r, i) => {
+  const items: MenuItem[] = records.slice(0, max).map((r, i) => {
     const when = new Date(r.createdAt).toISOString().slice(0, 16).replace('T', ' ')
     const title = r.title === undefined ? '(untitled)' : r.title
-    menu += '  ' + ANSI.bold + String(i + 1) + ')' + ANSI.reset + ' ' + title + ' ' + ANSI.dim + when + (r.cwd === undefined ? '' : ' · ' + r.cwd) + ANSI.reset + '\n'
+    return {
+      value: String(i + 1),
+      text: title + ' ' + ANSI.dim + when + (r.cwd === undefined ? '' : ' · ' + r.cwd) + ANSI.reset,
+    }
   })
-  menu += ANSI.dim + '0) start fresh' + ANSI.reset
-  const raw = (await askUser(state, menu + '\nchoose: ')).trim()
+  const raw = (await askUserMenu(state, {
+    title: 'resume a session',
+    items,
+    index: 0,
+    footer: '0) start fresh · ↑/↓ highlight · Enter picks',
+  })).trim()
   state.prompt = undefined
   const n = Number(raw)
   if (Number.isInteger(n) && n >= 1 && n <= max) return records[n - 1]?.id
@@ -730,6 +815,7 @@ const HELP_TEXT = [
   '  /fork [turn]                   branch into a child session and switch to it; [turn] rewinds to that turn',
   '  /new                           start a fresh session alongside this one',
   '  /bell                          toggle the turn-end bell',
+  '  /auto                          toggle auto-approve for this session (approval prompts answer themselves)',
   '  /sessions                      switch between live sessions or resume a persisted one',
   '  /exit                          flush the session and quit (also Ctrl+C at idle, Ctrl+D on empty)',
   'While the agent works, Ctrl+C interrupts; typing then Enter queues a follow-up (Alt+Up recalls it); Ctrl+O expands tool output.',
@@ -896,6 +982,15 @@ async function handleCommand(ctx: Context, state: TuiState, write: (text: string
   if (text.startsWith('/preset ')) { await switchPreset(ctx, state, write, text.slice('/preset '.length)); return true }
   if (text === '/mode') { await cycleMode(ctx, state, write); return true }
   if (text === '/bell') { state.bell = !state.bell; write('turn-end bell: ' + (state.bell ? 'on' : 'off')); return true }
+  if (text === '/auto') {
+    const key = state.current
+    if (key === undefined) { write('auto-approve: no current session'); return true }
+    const on = state.autoApprove.has(key)
+    if (on) state.autoApprove.delete(key)
+    else state.autoApprove.add(key)
+    write('auto-approve for this session: ' + (on ? 'off' : 'on') + ' (approval prompts are answered automatically)')
+    return true
+  }
   if (text === '/copy') { copyLastReply(state, write); return true }
   return false
 }
@@ -962,12 +1057,54 @@ async function run(ctx: Context, config: Config, io: TuiIo, state: TuiState, thr
   void ctx.get('llm')?.resolveModelInfo(selection.provider, selection.model)
     .then((info) => { state.contextWindow = info.context?.contextWindow })
     .catch(() => undefined)
+  // Define quit before the terminal comes up: setupFullScreen hands it to the
+  // editor callbacks, and --resume's picker can only run after term+editor exist.
+  const quit = (code: number): void => {
+    if (state.quitting) return
+    state.quitting = true
+    stopSpinner(state)
+    if (throttle.timer !== undefined) { clearTimeout(throttle.timer); throttle.timer = undefined }
+    state.editor?.stop()
+    state.term?.leave()
+    const settle = async (): Promise<void> => {
+      for (const v of state.views.values()) {
+        if (v.busy) {
+          v.agent.cancel({ kind: 'user' })
+          await Promise.race([
+            v.agent.whenIdle(),
+            new Promise<void>((resolve) => { setTimeout(resolve, 5000) }),
+          ]).catch(() => undefined)
+        }
+        await sessions.flush(v.agent.session).catch(() => undefined)
+        // NOTE: handles are intentionally not disposed here — process exit reclaims them.
+      }
+    }
+    void settle().finally(() => { io.exit(code) })
+    // Hard backstop only matters when graceful shutdown wedges the event loop;
+    // unref'd so a clean drain is not held open by the timer itself.
+    setTimeout(() => { process.exit(code) }, 8000).unref()
+  }
+  // The full-screen slash commands close over the agent handle created below;
+  // the editor only calls them later, so backfill this placeholder once they exist.
+  const commands: FullScreenCommands = {
+    fork: () => Promise.resolve(),
+    sessions: () => Promise.resolve(),
+    fresh: () => Promise.resolve(),
+  }
+  // Terminal + raw-mode editor come up BEFORE any modal picker. Previously
+  // --resume's picker ran first and its askUser had no term/editor to render
+  // into or read from, so the await could never settle on a TTY.
+  if (process.stdout.isTTY) setupFullScreen(ctx, state, throttle, quit, commands)
+
   let handle: { agent: Agent; dispose(): Promise<void> }
-  if (config.resume === true) {
+  if (config.resume === true && process.stdout.isTTY) {
     const id = await pickResume(ctx, state, throttle)
     if (id !== undefined) handle = await agents.resume({ resumeSessionId: SessionId(id), agentOptions, setup })
     else handle = await agents.create({ sessionId: SessionId('session-' + randomUUID()), meta, agentOptions, setup })
   } else {
+    if (config.resume === true && !process.stdout.isTTY) {
+      io.stderr.write('dsh: --resume needs an interactive terminal; starting a new session\n')
+    }
     handle = await agents.create({ sessionId: SessionId('session-' + randomUUID()), meta, agentOptions, setup })
   }
   const view = addView(state, handle.agent, handle)
@@ -1012,12 +1149,17 @@ async function run(ctx: Context, config: Config, io: TuiIo, state: TuiState, thr
 
   /** Modal picker over the current session's completed turns; 'latest' forks at the head. */
   const pickForkTurn = async (turns: TurnSummary[]): Promise<number | 'latest' | undefined> => {
-    let menu = ANSI.bold + 'fork at a past turn' + ANSI.reset + ANSI.dim + ' (later turns are dropped from the child)' + ANSI.reset + '\n'
-    turns.forEach((t, i) => {
-      menu += '  ' + ANSI.bold + String(i + 1) + ')' + ANSI.reset + ' turn ' + String(t.turn) + (t.snippet === '' ? '' : ' — ' + ANSI.dim + truncateAnsi(t.snippet, 60) + ANSI.reset) + '\n'
-    })
-    menu += ANSI.dim + '0) cancel · "latest" forks at the current point' + ANSI.reset
-    const raw = (await askUser(state, menu + '\nchoose: ')).trim()
+    const items: MenuItem[] = turns.map((t, i) => ({
+      value: String(i + 1),
+      text: 'turn ' + String(t.turn) + (t.snippet === '' ? '' : ' — ' + truncateAnsi(t.snippet, 60)),
+    }))
+    items.push({ value: 'latest', text: 'latest point (forks at the current point)' })
+    const raw = (await askUserMenu(state, {
+      title: 'fork at a past turn' + ANSI.dim + ' (later turns are dropped from the child)' + ANSI.reset,
+      items,
+      index: 0,
+      footer: '0) cancel · ↑/↓ highlight · Enter picks',
+    })).trim()
     state.prompt = undefined
     if (raw.toLowerCase() === 'latest') return 'latest'
     const n = Number(raw)
@@ -1129,43 +1271,30 @@ async function run(ctx: Context, config: Config, io: TuiIo, state: TuiState, thr
     }
   }
 
-  const quit = (code: number): void => {
-    if (state.quitting) return
-    state.quitting = true
-    stopSpinner(state)
-    if (throttle.timer !== undefined) { clearTimeout(throttle.timer); throttle.timer = undefined }
-    state.editor?.stop()
-    state.term?.leave()
-    const settle = async (): Promise<void> => {
-      for (const v of state.views.values()) {
-        if (v.busy) {
-          v.agent.cancel({ kind: 'user' })
-          await Promise.race([
-            v.agent.whenIdle(),
-            new Promise<void>((resolve) => { setTimeout(resolve, 5000) }),
-          ]).catch(() => undefined)
-        }
-        await sessions.flush(v.agent.session).catch(() => undefined)
-        // NOTE: handles are intentionally not disposed here — process exit reclaims them.
-      }
-    }
-    void settle().finally(() => { io.exit(code) })
-    // Hard backstop only matters when graceful shutdown wedges the event loop;
-    // unref'd so a clean drain is not held open by the timer itself.
-    setTimeout(() => { process.exit(code) }, 8000).unref()
-  }
-
+  // The slash commands close over the agent handle; backfill them now that
+  // fork/sessions/fresh exist, then light the full-screen UI (or the plain path).
+  commands.fork = forkCommand
+  commands.sessions = browseSessions
+  commands.fresh = fresh
   if (process.stdout.isTTY) {
-    runFullScreen(ctx, config, state, throttle, view, quit, { fork: forkCommand, sessions: browseSessions, fresh })
+    addSystem(state, 'dsh tui — ' + (view.agent.options.provider ?? '') + ' / ' + (view.agent.options.model ?? '') + (state.presetId === undefined ? '' : ' · preset ' + state.presetId) + ' — /help for commands', throttle)
+    updateTitle(state)
+    const initial = config.task
+    if (initial !== undefined) {
+      view.blocks.push({ kind: 'user', text: initial })
+      view.busy = true
+      view.agent.followup(createUserMessage({ content: [{ type: 'text', text: initial }], source: { kind: 'user' } }))
+    }
+    draw(state, throttle)
   } else {
     runPlain(config, io, state, view, quit)
   }
 }
 
 /** Full-screen path: alternate buffer + raw-mode editor + block rendering. */
-function runFullScreen(
-  ctx: Context, config: Config, state: TuiState,
-  throttle: Throttle, view: SessionView, quit: (code: number) => void, commands: FullScreenCommands,
+function setupFullScreen(
+  ctx: Context, state: TuiState,
+  throttle: Throttle, quit: (code: number) => void, commands: FullScreenCommands,
 ): void {
   const term = new Term(process.stdout)
   term.onResize = () => { draw(state, throttle) }
@@ -1179,7 +1308,13 @@ function runFullScreen(
         state.prompt = undefined
         editor.suggestEnabled = true
         editor.reset()
-        p.resolve(text)
+        // Empty Enter on a picker menu selects the highlighted row; a typed
+        // answer (number, 'latest', custom text) keeps the legacy behavior.
+        if (p.menu !== undefined && text.trim() === '') {
+          p.resolve(p.menu.items[p.menu.index]?.value ?? '')
+        } else {
+          p.resolve(text)
+        }
         draw(state, throttle)
         return
       }
@@ -1221,9 +1356,20 @@ function runFullScreen(
       if (current !== undefined && current.busy) { current.agent.cancel({ kind: 'user' }); addSystem(state, '(interrupting…)', throttle) }
       else { quit(0) }
     },
-    // Lone Esc (no dropdown): interrupt the running model only — never quits,
-    // unlike Ctrl+C which quits the app when idle.
+    // Lone Esc (no dropdown): a modal prompt/picker claims Esc first (close
+    // and resolve an empty answer = cancel / reject), and only with no modal
+    // open does Esc interrupt the running model. Esc never quits, unlike
+    // Ctrl+C which quits the app when idle.
     onEsc() {
+      if (state.prompt !== undefined) {
+        const p = state.prompt
+        state.prompt = undefined
+        if (state.editor !== undefined) state.editor.suggestEnabled = true
+        state.editor?.reset()
+        p.resolve('')
+        draw(state, throttle)
+        return
+      }
       const current = currentView(state)
       if (current !== undefined && current.busy) { current.agent.cancel({ kind: 'user' }); addSystem(state, '(interrupting…)', throttle) }
     },
@@ -1321,19 +1467,13 @@ function runFullScreen(
       if (current !== undefined) current.scroll = Math.max(0, current.scroll - 3)
       draw(state, throttle)
     },
+    // Modal picker menus consume the arrows; with no menu open the editor
+    // falls back to its own history navigation.
+    onArrowUp() { return navigatePromptMenu(state, -1) },
+    onArrowDown() { return navigatePromptMenu(state, 1) },
   })
   state.editor = editor
   editor.start()
-
-  addSystem(state, 'dsh tui — ' + (view.agent.options.provider ?? '') + ' / ' + (view.agent.options.model ?? '') + (state.presetId === undefined ? '' : ' · preset ' + state.presetId) + ' — /help for commands', throttle)
-  updateTitle(state)
-  const initial = config.task
-  if (initial !== undefined) {
-    view.blocks.push({ kind: 'user', text: initial })
-    view.busy = true
-    view.agent.followup(createUserMessage({ content: [{ type: 'text', text: initial }], source: { kind: 'user' } }))
-  }
-  draw(state, throttle)
 }
 
 /** Plain (non-TTY) path: line-stream text to stdout, read stdin via readline. */
@@ -1383,6 +1523,7 @@ export function apply(ctx: Context, config: Config): void {
     plainOut: undefined, plainCursor: { block: 0, reasoning: 0, text: 0 },
     spinnerTimer: undefined, spinnerFrame: 0, expandTools: false, bell: true, contextWindow: undefined,
     suggestRows: undefined, fileCache: undefined, modelArgsCache: new Map(), presetArgsCache: undefined,
+    autoApprove: new Set(),
   }
   const throttle: Throttle = { last: 0, timer: undefined }
 
@@ -1396,6 +1537,7 @@ export function apply(ctx: Context, config: Config): void {
         view.busy = true
         view.turnStartedAt = Date.now()
         view.turnUsage = emptyUsage()
+        view.streamUsage = undefined
         if (isCurrent) {
           startSpinner(state, throttle)
           state.term?.setProgress(true)
@@ -1405,21 +1547,71 @@ export function apply(ctx: Context, config: Config): void {
         const chunk = event.data.chunk
         if (chunk.type === 'reasoning-delta') { const b = ensureAssistant(view); b.reasoning = (b.reasoning ?? '') + chunk.text }
         else if (chunk.type === 'text-delta') { const b = ensureAssistant(view); b.text += chunk.text }
+        else if (chunk.type === 'tool-call-delta') {
+          // Stream the raw JSON arguments as they arrive (pi parity): create a
+          // live tool block and grow its args; the settled tool/call event
+          // replaces it with the authoritative block later.
+          const callId = String(chunk.id)
+          if (callId === '') break
+          view.openAssistant = undefined
+          const pending = findToolBlock(view, callId)
+          if (pending === undefined) {
+            view.blocks.push({ kind: 'tool', name: chunk.name ?? '', args: chunk.argumentsDelta, callId })
+          } else {
+            if (chunk.name !== undefined && chunk.name !== '') pending.name = chunk.name
+            pending.args += chunk.argumentsDelta
+          }
+        }
+        else if (chunk.type === 'usage') {
+          // Adapters emit the request's RUNNING totals, not deltas: snapshot
+          // (replace) them so the busy readout counts up live, and let
+          // assistant/message settle the authoritative total afterwards.
+          const usage = chunk.usage
+          view.streamUsage = usage
+          view.turnUsage = {
+            input: usage.inputTokens,
+            output: usage.outputTokens,
+            cacheRead: usage.cacheReadTokens ?? 0,
+            cacheWrite: usage.cacheWriteTokens ?? 0,
+          }
+          view.lastInputTokens = usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
+        }
         break
       }
       case 'assistant/message': {
         const usage = event.data.usage
         if (usage !== undefined) {
           addUsage(view.usage, usage)
-          addUsage(view.turnUsage, usage)
+          // Message usage is the settled total for the step. It is NOT
+          // additive with the chunk-level usage snapshots already displayed, so
+          // turnUsage is replaced rather than accumulated; session totals still
+          // accumulate once per message (unchanged).
+          view.turnUsage = {
+            input: usage.inputTokens,
+            output: usage.outputTokens,
+            cacheRead: usage.cacheReadTokens ?? 0,
+            cacheWrite: usage.cacheWriteTokens ?? 0,
+          }
+          view.streamUsage = undefined
           view.lastInputTokens = usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
         }
         break
       }
-      case 'tool/call':
+      case 'tool/call': {
         view.openAssistant = undefined
-        view.blocks.push({ kind: 'tool', name: event.data.name, args: event.data.arguments, callId: String(event.data.callId) })
+        const callId = String(event.data.callId)
+        // If tool-call-delta streaming already created a live block, replace
+        // its partial name/args with the settled authoritative values instead
+        // of pushing a duplicate block.
+        const pending = findToolBlock(view, callId)
+        if (pending !== undefined) {
+          pending.name = event.data.name
+          pending.args = event.data.arguments
+        } else {
+          view.blocks.push({ kind: 'tool', name: event.data.name, args: event.data.arguments, callId })
+        }
         break
+      }
       case 'tool/result': {
         const callId = String(event.data.message.source.callId)
         const diffs = diffsFromMeta(event.data.meta)
@@ -1472,6 +1664,18 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.on('approval/request', (req, next) => {
     if (state.editor === undefined || state.quitting) return next()
+    // Route the prompt to the owning session's view when it is tracked, so the
+    // user answers with that session's transcript on screen; untracked agents
+    // (sub-agents) are still labelled inside answerApproval.
+    const ownerKey = String(req.agent.session.id)
+    if (state.views.has(ownerKey) && state.current !== ownerKey) {
+      state.current = ownerKey
+      // Match the spinner/progress state to the view now on screen.
+      if (state.views.get(ownerKey)?.busy === true) startSpinner(state, throttle)
+      else stopSpinner(state)
+      updateTitle(state)
+      draw(state, throttle)
+    }
     return answerApproval(state, req)
   })
 

@@ -364,6 +364,43 @@ function feed(rig: Rig, text: string): void { rig.stdin.emit('data', Buffer.from
   check('up with dropdown open ignores history', rig.editor.value === '/')
 }
 
+// 23b. modal-menu arrows: callbacks returning true consume the key (history untouched)
+{
+  const stdin = Object.assign(new EventEmitter(), { isTTY: false, resume() {}, pause() {} })
+  let up = 0
+  let down = 0
+  const submitted: string[] = []
+  const editor = new LineEditor({
+    onSubmit(t: string) { submitted.push(t) },
+    onInterrupt() {}, onEof() {}, onChange() {},
+    onArrowUp() { up++; return true },
+    onArrowDown() { down++; return true },
+  }, stdin as never, { write() { return true } })
+  editor.start()
+  stdin.emit('data', Buffer.from('hello\r'))
+  stdin.emit('data', Buffer.from('\x1b[A'))
+  check('onArrowUp true consumes up arrow', up === 1 && editor.value === '')
+  stdin.emit('data', Buffer.from('\x1b[B'))
+  check('onArrowDown true consumes down arrow', down === 1 && editor.value === '')
+  check('menu arrows never submit', submitted.length === 1 && submitted[0] === 'hello')
+}
+
+// 23c. modal-menu arrows: callbacks returning false fall back to history
+{
+  const stdin = Object.assign(new EventEmitter(), { isTTY: false, resume() {}, pause() {} })
+  const editor = new LineEditor({
+    onSubmit() {}, onInterrupt() {}, onEof() {}, onChange() {},
+    onArrowUp() { return false },
+    onArrowDown() { return false },
+  }, stdin as never, { write() { return true } })
+  editor.start()
+  stdin.emit('data', Buffer.from('hello\r'))
+  stdin.emit('data', Buffer.from('\x1b[A'))
+  check('onArrowUp false falls back to history', editor.value === 'hello')
+  stdin.emit('data', Buffer.from('\x1b[B'))
+  check('onArrowDown false falls back to history', editor.value === '')
+}
+
 // 24. usage accumulation + formatting
 {
   const t = emptyUsage()

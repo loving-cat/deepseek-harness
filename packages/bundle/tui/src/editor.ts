@@ -38,6 +38,14 @@ export interface EditorCallbacks {
   onScrollUp?(): void
   /** Scroll the conversation down (PageDown / Ctrl+Down). */
   onScrollDown?(): void
+  /**
+   * Up arrow with no dropdown open. Return true when the caller consumed the
+   * key (a modal picker menu navigates its highlight); false falls back to
+   * history navigation.
+   */
+  onArrowUp?(): boolean
+  /** Down arrow with no dropdown open; same contract as {@link onArrowUp}. */
+  onArrowDown?(): boolean
   /** Mouse wheel up: scroll the conversation up (small step, unlike PageUp). */
   onWheelUp?(): void
   /** Mouse wheel down: scroll the conversation down (small step, unlike PageDown). */
@@ -533,9 +541,11 @@ export class LineEditor {
       case '\x1b[Z': case '\x1b[27;2;9~': this.callbacks.onShiftTab?.(); return
       case '\x1b[A':
         if (this.suggest !== undefined) { this.moveSuggest(-1); return }
+        if (this.callbacks.onArrowUp?.() === true) return
         this.historyUp(); return
       case '\x1b[B':
         if (this.suggest !== undefined) { this.moveSuggest(1); return }
+        if (this.callbacks.onArrowDown?.() === true) return
         this.historyDown(); return
       case '\x1b[C': this.moveRight(); return
       case '\x1b[D': this.moveLeft(); return
