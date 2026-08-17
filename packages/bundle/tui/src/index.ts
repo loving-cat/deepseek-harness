@@ -508,6 +508,36 @@ function askUser(state: TuiState, label: string): Promise<string> {
   })
 }
 
+/**
+ * Ask one line through the modal prompt, reserving the prompt immediately and
+ * filling the label once `label` settles. Reserving first closes the race
+ * where an interactive picker's async roster load leaves the editor in normal
+ * mode, so a fast answer would be submitted to the session as a chat message;
+ * callers must await their own `label` promise before interpreting the answer
+ * so an early reply still maps onto the final roster.
+ */
+function askUserDeferred(state: TuiState, label: Promise<string>): Promise<string> {
+  return new Promise((resolve) => {
+    state.prompt = { label: '', resolve }
+    // A modal prompt owns the input: no slash-command dropdown on top of it.
+    if (state.editor !== undefined) state.editor.suggestEnabled = false
+    state.editor?.reset()
+    state.term?.render(renderFrame(state))
+    void label.then(
+      (text) => {
+        if (state.prompt !== undefined) state.prompt.label = text
+        if (!state.quitting) state.term?.render(renderFrame(state))
+      },
+      (error: unknown) => {
+        if (state.prompt !== undefined) {
+          state.prompt.label = ANSI.brightRed + 'picker failed: ' + (error instanceof Error ? error.message : String(error)) + ANSI.reset + ' — Enter to cancel'
+        }
+        if (!state.quitting) state.term?.render(renderFrame(state))
+      },
+    )
+  })
+}
+
 /** Ensure an assistant block is open for streaming, creating one as needed. */
 function ensureAssistant(view: SessionView): AssistantBlock {
   if (view.openAssistant === undefined) {
@@ -1024,32 +1054,42 @@ async function run(ctx: Context, config: Config, io: TuiIo, state: TuiState, thr
       entries.push({
         kind: 'live',
         id,
-        label: truncateAnsi(title === '' ? '(no user message yet)' : title, 60)
+        // Short id tail distinguishes forked siblings that share the same
+        // first user message (identical titles otherwise).
+        label: truncateAnsi(title === '' ? '(no user message yet)' : title, 48)
+          + ' ' + ANSI.dim + '#' + id.slice(-6) + ANSI.reset
           + (id === state.current ? ' ' + ANSI.dim + '(current)' + ANSI.reset : '')
           + (v.busy ? ' ' + ANSI.brightYellow + 'working' + ANSI.reset : ''),
       })
     }
-    const query = ctx.get('sessionQuery') as SessionQueryLike | undefined
-    if (query !== undefined) {
-      try {
-        const persisted = await query.listSessions()
-        const stored = persisted.filter(s => !state.views.has(s.header.id)).slice(0, 15)
-        const titleById = await fetchTitles(query, stored.map(s => s.header.id))
-        for (const s of stored) {
-          const when = new Date(s.header.createdAt).toISOString().slice(0, 16).replace('T', ' ')
-          const title = titleById.get(s.header.id) ?? '(untitled)'
-          entries.push({ kind: 'stored', id: s.header.id, label: truncateAnsi(title, 60) + ' ' + ANSI.dim + when + ANSI.reset })
-        }
-      } catch { /* a listing failure still leaves the live entries */ }
-    }
-    if (entries.length === 0) { addSystem(state, 'no sessions to switch to', throttle); return }
-    let menu = ANSI.bold + 'sessions' + ANSI.reset + ANSI.dim + ' — ● live, others resume from disk' + ANSI.reset + '\n'
-    entries.forEach((e, i) => {
-      const marker = e.kind === 'live' ? ANSI.green + '●' + ANSI.reset : ANSI.dim + '○' + ANSI.reset
-      menu += '  ' + ANSI.bold + String(i + 1) + ')' + ANSI.reset + ' ' + marker + ' ' + e.label + '\n'
-    })
-    menu += ANSI.dim + '0) cancel' + ANSI.reset
-    const raw = (await askUser(state, menu + '\nchoose: ')).trim()
+    // The stored roster loads asynchronously; reserve the modal prompt NOW so
+    // a fast answer cannot be submitted to the session as a chat message, and
+    // let the menu paint once the roster settles.
+    const listing = (async (): Promise<string> => {
+      const query = ctx.get('sessionQuery') as SessionQueryLike | undefined
+      if (query !== undefined) {
+        try {
+          const persisted = await query.listSessions()
+          const stored = persisted.filter(s => !state.views.has(s.header.id)).slice(0, 15)
+          const titleById = await fetchTitles(query, stored.map(s => s.header.id))
+          for (const s of stored) {
+            const when = new Date(s.header.createdAt).toISOString().slice(0, 16).replace('T', ' ')
+            const title = titleById.get(s.header.id) ?? '(untitled)'
+            entries.push({ kind: 'stored', id: s.header.id, label: truncateAnsi(title, 60) + ' ' + ANSI.dim + when + ANSI.reset })
+          }
+        } catch { /* a listing failure still leaves the live entries */ }
+      }
+      if (entries.length === 0) return 'no sessions to switch to'
+      let menu = ANSI.bold + 'sessions' + ANSI.reset + ANSI.dim + ' — ● live, others resume from disk' + ANSI.reset + '\n'
+      entries.forEach((e, i) => {
+        const marker = e.kind === 'live' ? ANSI.green + '●' + ANSI.reset : ANSI.dim + '○' + ANSI.reset
+        menu += '  ' + ANSI.bold + String(i + 1) + ')' + ANSI.reset + ' ' + marker + ' ' + e.label + '\n'
+      })
+      menu += ANSI.dim + '0) cancel' + ANSI.reset
+      return menu + '\nchoose: '
+    })()
+    const raw = (await askUserDeferred(state, listing)).trim()
+    await listing.catch(() => undefined) // roster settled before mapping the answer
     state.prompt = undefined
     const n = Number(raw)
     if (!Number.isInteger(n) || n < 1 || n > entries.length) return

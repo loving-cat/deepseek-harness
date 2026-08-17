@@ -413,7 +413,13 @@ export class LineEditor {
     const wasOpen = this.suggest !== undefined
     this.suggest = next
     const isOpen = next !== undefined
-    if (isOpen !== wasOpen) this.setMouse(isOpen)
+    if (isOpen !== wasOpen) {
+      this.setMouse(isOpen)
+      // The renderer is driven by onChange; a dropdown open/close must repaint
+      // even when the keystroke's own onChange already drew (that draw can fire
+      // before refreshSuggest runs, leaving the screen on the pre-dropdown frame).
+      this.callbacks.onChange()
+    }
   }
 
   /** SGR mouse reporting follows the dropdown: on while open, off when closed. */
