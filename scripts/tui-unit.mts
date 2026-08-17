@@ -451,9 +451,11 @@ function feed(rig: Rig, text: string): void { rig.stdin.emit('data', Buffer.from
   check('apply drops @ and adds space', editor.value === 'read package.json ')
 }
 
-// 30. mouse: SGR press fires onMousePress, release ignored; mode toggles with the dropdown
+// 30. mouse: SGR press fires onMousePress, release ignored; reporting is on for the
+// whole session (wheel scrolls anywhere), stop() restores it
 {
   const events: string[] = []
+  const wheels: string[] = []
   const stdin = Object.assign(new EventEmitter(), { isTTY: false, resume() {}, pause() {} })
   const written: string[] = []
   const stdout = { write(c: string) { written.push(c); return true } }
@@ -461,16 +463,24 @@ function feed(rig: Rig, text: string): void { rig.stdin.emit('data', Buffer.from
     onSubmit() {}, onInterrupt() {}, onEof() {}, onChange() {},
     onSuggest: () => [{ value: 'model' }, { value: 'fork' }],
     onMousePress(col, row) { events.push(`${col},${row}`) },
+    onWheelUp() { wheels.push('up') },
+    onWheelDown() { wheels.push('down') },
   }, stdin as never, stdout)
   editor.start()
+  check('start enables mouse reporting', written.join('').includes('\x1b[?1000h') && written.join('').includes('\x1b[?1006h'))
   stdin.emit('data', Buffer.from('/'))
-  check('dropdown open enables mouse reporting', written.join('').includes('\x1b[?1000h') && written.join('').includes('\x1b[?1006h'))
+  check('dropdown open keeps mouse reporting on', written.join('').includes('\x1b[?1000h') && written.join('').includes('\x1b[?1006h'))
   stdin.emit('data', Buffer.from('\x1b[<0;7;23M'))
   stdin.emit('data', Buffer.from('\x1b[<0;7;23m'))
   check('press parsed, release ignored', events.length === 1 && events[0] === '7,23')
   editor.applySuggestAt(1)
   check('applySuggestAt applies row', editor.value === '/fork ')
-  check('dropdown close disables mouse reporting', written.join('').includes('\x1b[?1006l\x1b[?1000l'))
+  stdin.emit('data', Buffer.from('\x1b[<64;1;1M'))
+  stdin.emit('data', Buffer.from('\x1b[<65;1;1M'))
+  check('wheel up/down fire wheel callbacks', wheels.join(',') === 'up,down')
+  check('dropdown close does not disable mouse (always-on)', !written.join('').includes('\x1b[?1000l'))
+  editor.stop()
+  check('stop restores mouse reporting', written.join('').includes('\x1b[?1006l\x1b[?1000l'))
 }
 
 // 31. clipboard write/read roundtrip (real system clipboard)

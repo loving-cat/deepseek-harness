@@ -735,7 +735,7 @@ const HELP_TEXT = [
   'While the agent works, Ctrl+C interrupts; typing then Enter queues a follow-up (Alt+Up recalls it); Ctrl+O expands tool output.',
   'Editor: / opens command autocomplete (also completes @file-paths and command args); click or Tab completes; Enter runs.',
   'Ctrl+Z undo · Ctrl+Y yank · Ctrl+X copy last reply · Ctrl+G external editor ($EDITOR).',
-  'While the agent works, Ctrl+C interrupts; PageUp/PageDown scroll; Shift+Enter inserts a newline (Alt+Enter works too).',
+  'While the agent works, Ctrl+C interrupts; PageUp/PageDown or the wheel scroll the history (Shift+drag selects text); Shift+Enter inserts a newline (Alt+Enter works too).',
   'Typing / opens command autocomplete (fuzzy, case-insensitive); Tab completes, Enter runs, Esc closes.',
   'Large pastes collapse into [paste #N …] markers; Ctrl+V / Alt+V pastes an image from the clipboard (path inserted).',
 ].join('\n')
@@ -1302,6 +1302,17 @@ function runFullScreen(
     onScrollDown() {
       const current = currentView(state)
       if (current !== undefined) current.scroll = Math.max(0, current.scroll - Math.max(1, term.height - 4))
+      draw(state, throttle)
+    },
+    // Wheel: a few lines per notch (unlike PageUp/PageDown's page step).
+    onWheelUp() {
+      const current = currentView(state)
+      if (current !== undefined) current.scroll += 3
+      draw(state, throttle)
+    },
+    onWheelDown() {
+      const current = currentView(state)
+      if (current !== undefined) current.scroll = Math.max(0, current.scroll - 3)
       draw(state, throttle)
     },
   })

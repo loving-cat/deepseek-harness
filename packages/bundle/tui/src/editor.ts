@@ -36,6 +36,10 @@ export interface EditorCallbacks {
   onScrollUp?(): void
   /** Scroll the conversation down (PageDown / Ctrl+Down). */
   onScrollDown?(): void
+  /** Mouse wheel up: scroll the conversation up (small step, unlike PageUp). */
+  onWheelUp?(): void
+  /** Mouse wheel down: scroll the conversation down (small step, unlike PageDown). */
+  onWheelDown?(): void
   /**
    * Ctrl+V / Alt+V image-paste shortcut (pi parity: win32 = Alt+V since the
    * terminal owns Ctrl+V for text; the caller owns the async clipboard read
@@ -63,7 +67,7 @@ export interface EditorCallbacks {
   onShiftTab?(): void
   /** Alt+Up: recall queued follow-ups into the editor (caller owns the queue). */
   onRecallPending?(): void
-  /** SGR mouse press (only delivered while the dropdown is open): 1-based col/row. */
+  /** SGR mouse press: 1-based col/row (reporting is always on; the caller only acts while a dropdown is open). */
   onMousePress?(col: number, row: number): void
   /** Ctrl+X: copy the last reply to the clipboard (caller owns it). */
   onCopy?(): void
@@ -204,8 +208,12 @@ export class LineEditor {
     this.stdin.resume()
     this.stdin.on('data', this.dataHandler)
     // Bracketed paste on; Kitty push + query + DA sentinel (see module docs).
+    // SGR mouse reporting is on for the whole session: the wheel scrolls the
+    // transcript and clicks drive the dropdown from anywhere (Shift+drag still
+    // selects text in Windows Terminal / WezTerm / kitty).
     this.kittyPushed = true
-    this.stdout.write('\x1b[?2004h' + '\x1b[>1u' + '\x1b[?u' + '\x1b[c')
+    this.mouseActive = true
+    this.stdout.write('\x1b[?1000h\x1b[?1006h' + '\x1b[?2004h' + '\x1b[>1u' + '\x1b[?u' + '\x1b[c')
   }
 
   /** Restore raw mode and stop reading. */
@@ -414,19 +422,12 @@ export class LineEditor {
     this.suggest = next
     const isOpen = next !== undefined
     if (isOpen !== wasOpen) {
-      this.setMouse(isOpen)
-      // The renderer is driven by onChange; a dropdown open/close must repaint
-      // even when the keystroke's own onChange already drew (that draw can fire
-      // before refreshSuggest runs, leaving the screen on the pre-dropdown frame).
+      // Mouse reporting stays on for the whole session (wheel scrolls everywhere);
+      // the renderer still needs repainting on an open/close so the keystroke's
+      // own onChange (which can fire before refreshSuggest runs) can't strand the
+      // screen on the pre-dropdown frame.
       this.callbacks.onChange()
     }
-  }
-
-  /** SGR mouse reporting follows the dropdown: on while open, off when closed. */
-  private setMouse(on: boolean): void {
-    if (this.mouseActive === on || !this.started) return
-    this.mouseActive = on
-    this.stdout.write(on ? '\x1b[?1000h\x1b[?1006h' : '\x1b[?1006l\x1b[?1000l')
   }
 
   /** Fill the highlighted item into the input and close the dropdown. */
@@ -505,15 +506,14 @@ export class LineEditor {
       return
     }
     // SGR mouse: \x1b[<<btn>;<col>;<row>M (press) / m (release). Left press goes
-    // to the dropdown; the wheel scrolls the transcript (arrives only while
-    // mouse reporting is on, i.e. while the dropdown is open).
+    // to the dropdown; the wheel scrolls the transcript (reporting is always on).
     const mouse = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/.exec(seq)
     if (mouse !== null) {
       if (mouse[4] === 'M') {
         const btn = Number(mouse[1] ?? '0')
         if (btn === 0) this.callbacks.onMousePress?.(Number(mouse[2] ?? '0'), Number(mouse[3] ?? '0'))
-        else if (btn === 64) this.callbacks.onScrollUp?.()
-        else if (btn === 65) this.callbacks.onScrollDown?.()
+        else if (btn === 64) (this.callbacks.onWheelUp ?? this.callbacks.onScrollUp)?.()
+        else if (btn === 65) (this.callbacks.onWheelDown ?? this.callbacks.onScrollDown)?.()
       }
       return
     }
