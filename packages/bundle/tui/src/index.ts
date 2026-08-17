@@ -166,7 +166,7 @@ const SLASH_COMMANDS: readonly SuggestItem[] = [
 
 /**
  * Case-fold a slash command's name (arguments keep their case) and drop
- * trailing space, so /MODEL, '/model ' and '/Model deepseek-v4-pro' all work.
+ * trailing space, so /MODEL, '/model ' and '/Model deepseek-v4-pro-0813' all work.
  */
 function normalizeCommand(text: string): string {
   const trimmed = text.trimEnd()

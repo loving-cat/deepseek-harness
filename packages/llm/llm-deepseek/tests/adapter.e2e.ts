@@ -17,7 +17,7 @@ import { assemble, type AssembledResult } from './assemble.ts'
  */
 
 const FLASH = 'deepseek-v4-flash'
-const PRO = 'deepseek-v4-pro'
+const PRO = 'deepseek-v4-pro-0813'
 const contexts: Context[] = []
 let identityHome: string
 

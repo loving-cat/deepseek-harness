@@ -659,7 +659,7 @@ describe('plugin registration and config', () => {
     expect(ctx.llm.listProviders()).toEqual([{ id: 'deepseek-official', name: 'DeepSeek' }])
     await expect(ctx.llm.listModels('deepseek-official')).resolves.toEqual([
       { provider: 'deepseek-official', id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash', inputModalities: ['text'] },
-      { provider: 'deepseek-official', id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro', inputModalities: ['text'] },
+      { provider: 'deepseek-official', id: 'deepseek-v4-pro-0813', name: 'DeepSeek-V4-Pro-0813', inputModalities: ['text'] },
     ])
     await expect(ctx.llm.resolveModelInfo('deepseek-official', 'deepseek-v4-flash'))
       .resolves.toMatchObject({
@@ -754,7 +754,7 @@ describe('plugin registration and config', () => {
     LlmDeepSeek.apply(ctx, { baseURL: 'http://127.0.0.1:1' })
     await expect(ctx.llm.listModels('deepseek-official')).resolves.toEqual([
       { provider: 'deepseek-official', id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash', inputModalities: ['text'] },
-      { provider: 'deepseek-official', id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro', inputModalities: ['text'] },
+      { provider: 'deepseek-official', id: 'deepseek-v4-pro-0813', name: 'DeepSeek-V4-Pro-0813', inputModalities: ['text'] },
     ])
   })
 
