@@ -156,8 +156,12 @@ export async function* translate(payloads: AsyncIterable<string>): AsyncGenerato
           toolBlocks.set(call.index, block)
           yield { type: 'block-start', index: block.index, blockType: 'tool-call' }
         }
-        if (call.id !== undefined) block.callId = call.id
-        if (call.function?.name !== undefined) block.name = call.function.name
+        // Some gateways repeat empty id/name on continuation deltas; only
+        // non-empty values may (re)fill the accumulated block, or the final
+        // tool-call message would carry a blank id and every follow-up
+        // request would be rejected with 400 INVALID_REQUEST.
+        if (call.id !== undefined && call.id !== '') block.callId = call.id
+        if (call.function?.name !== undefined && call.function.name !== '') block.name = call.function.name
         const fragment = call.function?.arguments ?? ''
         block.text += fragment
         yield {

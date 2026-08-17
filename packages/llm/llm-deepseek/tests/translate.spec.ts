@@ -123,6 +123,30 @@ describe('translate: tool calls', () => {
     ])
   })
 
+  it('keeps the first id/name when continuation deltas repeat empty strings', async () => {
+    // Some gateways echo empty id/name on continuation deltas; a blank id
+    // must never overwrite the accumulated one, or the follow-up request
+    // sends an empty tool_call_id and the API rejects it with 400.
+    const head = { index: 0, id: 'call_00_x', type: 'function', function: { name: 'get_weather', arguments: '' } }
+    const continuation = { index: 0, id: '', function: { name: '', arguments: '{"city"' } }
+    const tail = { index: 0, function: { arguments: ': "Paris"}' } }
+    const chunks = await collect(translate(feed(
+      firstChunk,
+      { choices: [{ delta: { tool_calls: [head] } }] },
+      { choices: [{ delta: { tool_calls: [continuation] } }] },
+      { choices: [{ delta: { tool_calls: [tail] } }] },
+      { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+      DONE,
+    )))
+    expect(chunks.filter(chunk => chunk.type === 'block-end')).toEqual([
+      {
+        type: 'block-end',
+        index: 0,
+        block: { type: 'tool-call', id: 'call_00_x', name: 'get_weather', arguments: '{"city": "Paris"}' },
+      },
+    ])
+  })
+
   it('disambiguates parallel tool calls by wire index', async () => {
     const chunks = await collect(translate(feed(
       firstChunk,
