@@ -51,6 +51,22 @@ type PreparedStep =
   | { kind: 'reject' }
   | { kind: 'enter'; messages: UserMessage[]; assembly: PromptAssembly }
 
+/**
+ * Reduce an AbortSignal reason to the durable AgentCancelCause shape. The
+ * signal reason is whatever object the aborting caller supplied — and may be
+ * decorated by the runtime (a non-enumerable `stack` has been observed) —
+ * while the turn/end event is a JSON-safe session log record. Rebuilding a
+ * fresh plain object keeps the durable log lossless even if the reason gains
+ * extra own properties.
+ */
+function durableCancelCause(reason: unknown): AgentCancelCause {
+  const r = reason as Partial<AgentCancelCause> | null | undefined
+  if (r === null || typeof r !== 'object') return { kind: 'user' }
+  if (r.kind === 'hook') return { kind: 'hook', reason: typeof r.reason === 'string' ? r.reason : 'hook' }
+  if (r.kind === 'parent' || r.kind === 'disposed' || r.kind === 'user') return { kind: r.kind }
+  return { kind: 'user' }
+}
+
 /** Remove adapter-derived values before plugins propose the next request config. */
 function requestProposal(header: EpochHeader): LlmCallConfig {
   if (header.adapterDefaults === undefined) return header.config
@@ -301,7 +317,7 @@ export class ReactLoopAgent implements Agent {
       }
     } catch (error: unknown) {
       if (signal.aborted) {
-        turnEnds = { kind: 'aborted', reason: signal.reason as AgentCancelCause }
+        turnEnds = { kind: 'aborted', reason: durableCancelCause(signal.reason) }
         throw error
       }
       // Every failure is structured: an `LlmError` keeps its facts, anything

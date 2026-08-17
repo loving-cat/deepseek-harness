@@ -319,6 +319,26 @@ function feed(rig: Rig, text: string): void { rig.stdin.emit('data', Buffer.from
   check('enter applies+submits /model', rig.submitted.length === 1 && rig.submitted[0] === '/model ')
 }
 
+// 21b. Esc: closes the dropdown first (no interrupt); with no dropdown it fires onEsc
+{
+  const stdin = Object.assign(new EventEmitter(), { isTTY: false, resume() {}, pause() {} })
+  const stdout = { write() { return true } }
+  let escs = 0
+  const editor = new LineEditor({
+    onSubmit() {}, onInterrupt() {}, onEof() {}, onChange() {},
+    onSuggest: () => [{ value: 'help' }, { value: 'model' }],
+    onEsc() { escs++ },
+  }, stdin as never, stdout)
+  editor.start()
+  stdin.emit('data', Buffer.from('/'))
+  stdin.emit('data', Buffer.from('\x1b')) // stashed as a possible sequence, flushed after 25ms
+  await new Promise(r => setTimeout(r, 60))
+  check('esc closes dropdown without firing onEsc', editor.suggest === undefined && escs === 0)
+  stdin.emit('data', Buffer.from('\x1b'))
+  await new Promise(r => setTimeout(r, 60))
+  check('esc with no dropdown fires onEsc', escs === 1)
+}
+
 // 22. dropdown closes on whitespace and stays shut with suggestEnabled=false
 {
   const rig = makeEditor(true)

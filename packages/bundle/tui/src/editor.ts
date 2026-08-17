@@ -28,6 +28,8 @@ export interface EditorCallbacks {
   onSubmit(text: string): void
   /** Ctrl+C. The caller decides interrupt-vs-quit from busy state. */
   onInterrupt(): void
+  /** Lone Esc with no dropdown open: the caller usually interrupts the model (no-op when idle). */
+  onEsc?(): void
   /** Ctrl+D on an empty line (EOF). */
   onEof(): void
   /** The value or cursor moved; a repaint is wanted. */
@@ -512,8 +514,13 @@ export class LineEditor {
       if (mouse[4] === 'M') {
         const btn = Number(mouse[1] ?? '0')
         if (btn === 0) this.callbacks.onMousePress?.(Number(mouse[2] ?? '0'), Number(mouse[3] ?? '0'))
-        else if (btn === 64) (this.callbacks.onWheelUp ?? this.callbacks.onScrollUp)?.()
-        else if (btn === 65) (this.callbacks.onWheelDown ?? this.callbacks.onScrollDown)?.()
+        else if (btn === 64) {
+          if (this.callbacks.onWheelUp !== undefined) this.callbacks.onWheelUp()
+          else this.callbacks.onScrollUp?.()
+        } else if (btn === 65) {
+          if (this.callbacks.onWheelDown !== undefined) this.callbacks.onWheelDown()
+          else this.callbacks.onScrollDown?.()
+        }
       }
       return
     }
@@ -533,8 +540,10 @@ export class LineEditor {
       case '\x1b[C': this.moveRight(); return
       case '\x1b[D': this.moveLeft(); return
       case '\x1b':
-        // Lone ESC closes the dropdown first; a second ESC is ignored.
-        if (this.suggest !== undefined) { this.suggestDismissed = true; this.setSuggest(undefined); this.callbacks.onChange() }
+        // Lone ESC: closing the dropdown takes priority; with no dropdown the
+        // caller usually interrupts the running model (ESC-terminates-thinking).
+        if (this.suggest !== undefined) { this.suggestDismissed = true; this.setSuggest(undefined); this.callbacks.onChange(); return }
+        this.callbacks.onEsc?.()
         return
       case '\x1b[H': case '\x1b[1~': case '\x1bOH': this.moveHome(); return
       case '\x1b[F': case '\x1b[4~': case '\x1bOF': this.moveEnd(); return

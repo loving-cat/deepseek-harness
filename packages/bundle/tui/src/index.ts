@@ -1221,6 +1221,12 @@ function runFullScreen(
       if (current !== undefined && current.busy) { current.agent.cancel({ kind: 'user' }); addSystem(state, '(interrupting…)', throttle) }
       else { quit(0) }
     },
+    // Lone Esc (no dropdown): interrupt the running model only — never quits,
+    // unlike Ctrl+C which quits the app when idle.
+    onEsc() {
+      const current = currentView(state)
+      if (current !== undefined && current.busy) { current.agent.cancel({ kind: 'user' }); addSystem(state, '(interrupting…)', throttle) }
+    },
     onEof() { quit(0) },
     onChange() { draw(state, throttle) },
     onPasteImage() { void pasteFromClipboard(state) },
