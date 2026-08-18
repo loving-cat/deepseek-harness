@@ -33,6 +33,14 @@
       config:
         default: standard
 
+    # The Cordis host runner: provides dynamicCordisRunner + cordisInspect,
+    # which the 'cordis' (创造模式) preset's tool-cordis requires. Web mounts it;
+    # without it here the creative preset fails to mount (tool waits on the
+    # service). Same trust boundary as Web: the preset's model may mutate the
+    # live runtime.
+    - id: cordis-host-runner
+      name: '@deepseek-ai/dsh-cordis-host-runner'
+
     - id: tui-startup
       name: '@deepseek-ai/dsh-tui/startup'
 
