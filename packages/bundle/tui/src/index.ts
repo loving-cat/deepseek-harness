@@ -25,6 +25,17 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEventMap, TodoItem } from '@deepseek-ai/dsh-session'
+
+// The sandbox-policy package extends SessionEventMap with 'sandbox/mode' via
+// its own declare-module patch, but this bundle cannot import that package's
+// sources (rootDir). Declare the event locally so session.append types check;
+// the runtime event is exactly what setSandboxMode records — a log-only,
+// replayable mode override (see packages/sandbox/sandbox-policy).
+declare module '@deepseek-ai/dsh-session' {
+  interface SessionEventMap {
+    'sandbox/mode': { mode: 'read-only' | 'workspace-write' | 'danger-full-access' }
+  }
+}
 import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import type { AskUserQuestionAnswer, AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
@@ -37,7 +48,7 @@ import { readClipboardImage, readClipboardText, writeClipboardText } from './cli
 import { addUsage, billedInput, emptyUsage, formatCache, formatTokens, type TokenUsageLike, type UsageTotals } from './usage.ts'
 import { scanFiles } from './files.ts'
 import { LineEditor, type SuggestItem } from './editor.ts'
-import { renderShellPanel, cleanCopiedLine } from './shellpanel.ts'
+import { renderShellPanel, cleanCopiedLine, isDangerousWorkspaceRoot } from './shellpanel.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'tui-runner'
@@ -153,6 +164,10 @@ interface TuiState {
   spinnerFrame: number
   /** Ctrl+O: render tool args/results in full instead of the 8-line digest. */
   expandTools: boolean
+  /** Sandbox trust mode for the status bar: 'read-only' | 'workspace-write' | undefined (deployment default). */
+  sandboxTrust: 'read-only' | 'workspace-write' | undefined
+  /** True while the session workspace is a dangerous root (drive root / home dir); Alt+1 switches trust. */
+  sandboxWorkspaceDangerous: boolean
   /** /bell: ring the terminal bell when the current view's turn ends. */
   bell: boolean
   /** Current route's context window, when the adapter discloses it. */
@@ -499,9 +514,14 @@ function buildStatus(state: TuiState, width: number): string {
   const sessions = state.views.size > 1 ? ' · ' + ANSI.dim + '⇄ ' + String(state.views.size) + ' sessions' + ANSI.reset : ''
   const preset = state.presetId === undefined ? '' : ' · ' + ANSI.brightCyan + (state.presetName ?? state.presetId) + ANSI.reset
   const branch = state.gitBranch === undefined ? '' : ' · ' + ANSI.cyan + state.gitBranch + ANSI.reset
-  // Greedily keep segments by priority: activity > sessions > todos > stats > preset > branch.
+  const sandbox = state.sandboxWorkspaceDangerous
+    ? ' · ' + ANSI.yellow + (state.sandboxTrust === 'workspace-write' ? 'trusted' : 'read-only') + ANSI.reset + ANSI.dim + ' (Alt+1 trust)' + ANSI.reset
+    : state.sandboxTrust === 'workspace-write'
+      ? ' · ' + ANSI.green + 'trusted' + ANSI.reset
+      : ''
+  // Greedily keep segments by priority: activity > sessions > todos > stats > preset > branch > sandbox.
   let out = ANSI.bold + 'dsh tui' + ANSI.reset + ' ' + ANSI.dim + model + ANSI.reset + ' ' + activity
-  for (const seg of [sessions, auto, todos, stats === '' ? '' : ANSI.dim + stats + ANSI.reset, preset, branch]) {
+  for (const seg of [sessions, auto, todos, stats === '' ? '' : ANSI.dim + stats + ANSI.reset, preset, branch, sandbox]) {
     if (seg !== '' && ansiLength(out + seg) <= width) out += seg
   }
   return out
@@ -1222,6 +1242,7 @@ const HELP_TEXT = [
   '  /tree                          show the session family tree (fork lineage); Enter switches',
   '  /export                        write the current session transcript to dsh-export-<id>.md',
   '  Ctrl+T                          toggle the thinking (reasoning) display',
+  '  Alt+1                          toggle sandbox trust (read-only ⇄ workspace-write; saved per session)',
   '  Ctrl+P                          cycle to the next model (provider catalog)',
   '  Ctrl+L                          open the model picker menu',
   '  /auto                          toggle auto-approve for this session (approval prompts answer themselves)',
@@ -1391,6 +1412,26 @@ async function setupConfig(ctx: Context, state: TuiState, write: (text: string) 
     write('dsh: both provider and model are needed to switch — nothing changed')
   }
   write(ANSI.dim + '/setup done — saved under ~/.dsh (settings.yaml + .credentials.yaml)' + ANSI.reset)
+}
+
+/**
+ * Alt+1: toggle the sandbox trust mode for the current session — read-only
+ * (safe; the default when the workspace is a dangerous root) ⇄ workspace-write
+ * (trusted; files under the session workspace become writable). Persisted to
+ * the session log via the `sandbox/mode` event, so the choice survives a
+ * restart; the engine replays it on resume.
+ */
+function toggleSandboxTrust(state: TuiState, write: (text: string) => void): void {
+  const view = currentView(state)
+  const session = view?.agent.session
+  if (session === undefined) { write('dsh: no active session to switch sandbox trust for'); return }
+  const next = state.sandboxTrust === 'workspace-write' ? 'read-only' : 'workspace-write'
+  state.sandboxTrust = next
+  // Log-only, replayable sandbox-mode override (same event setSandboxMode
+  // records); takes effect on the session's next confined call.
+  session.append('sandbox/mode', { mode: next })
+  const dangerous = state.sandboxWorkspaceDangerous ? ' — ' + ANSI.yellow + 'workspace is a drive/home root: file writes stay sandboxed' + ANSI.reset : ''
+  write('sandbox: ' + (next === 'workspace-write' ? ANSI.green + 'workspace-write (trusted)' + ANSI.reset : ANSI.dim + 'read-only (safe)' + ANSI.reset) + dangerous)
 }
 
 /** Shift+Tab: cycle the reasoning effort (high → max → off → high), keeping provider/model. */
@@ -1704,6 +1745,12 @@ async function run(ctx: Context, config: Config, io: TuiIo, state: TuiState, thr
   state.presetId = agentPreset
   state.presetName = undefined // resolved lazily by the first /preset | /mode roster read
   state.gitBranch = readGitBranch(process.cwd())
+  // Dangerous workspace detection: drive roots / user home / temp roots make
+  // the Windows ACL sandbox either reject the temp root or need admin rights
+  // for a whole-disk grant. The safe default is read-only; Alt+1 opts the
+  // session into workspace-write trust.
+  state.sandboxWorkspaceDangerous = isDangerousWorkspaceRoot(process.cwd())
+  state.sandboxTrust = state.sandboxWorkspaceDangerous ? 'read-only' : undefined
 
   const agentOptions = { provider: selection.provider, model: selection.model }
   const meta = { cwd: process.cwd(), ...(agentPreset === undefined ? {} : { agentPreset }) }
@@ -2187,6 +2234,7 @@ function setupFullScreen(
     },
     onCycleModel() { void cycleModel(ctx, state, (t) => { addSystem(state, t, throttle) }) },
     onCycleModelReverse() { void cycleModel(ctx, state, (t) => { addSystem(state, t, throttle) }, true) },
+    onToggleSandboxTrust() { toggleSandboxTrust(state, (t) => { addSystem(state, t, throttle) }) },
     onModelPicker() { void pickModel(ctx, state, (t) => { addSystem(state, t, throttle) }) },
     onExternalEditor() {
       // The external-editor hand-over swaps the whole terminal; refuse while a
@@ -2311,6 +2359,7 @@ export function apply(ctx: Context, config: Config): void {
     editor: undefined, prompt: undefined,
     plainOut: undefined, plainCursor: { block: 0, reasoning: 0, text: 0 },
     spinnerTimer: undefined, spinnerFrame: 0, expandTools: false, bell: true, contextWindow: undefined,
+    sandboxTrust: undefined, sandboxWorkspaceDangerous: false,
     suggestRows: undefined, fileCache: undefined, modelArgsCache: new Map(), presetArgsCache: undefined,
     autoApprove: new Set(),
     showReasoning: true, titles: new Map(),

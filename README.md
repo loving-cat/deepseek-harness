@@ -56,6 +56,7 @@ DEEPSEEK_API_KEY: sk-...
 | `~/.dsh/settings.yaml` | — | ⚠️ optional | Only needed to override the default model / endpoint. |
 | node-pty | bundled | ⚠️ Windows | Full-screen TUI needs a real pty; on Windows the build needs the VS Build Tools (C++ toolchain). |
 | kitty / WezTerm | — | ⚠️ optional | Inline image rendering (kitty graphics); Windows Terminal lacks it. |
+| Windows ACL sandbox | built-in | ⚠️ Windows | Drive-root / home-dir workspaces default to read-only; `Alt+1` toggles trust per session. |
 
 What was added on top of upstream:
 

@@ -726,5 +726,17 @@ import { renderShellPanel, shellCommand, cleanCopiedLine } from '../packages/bun
   check('empty line untouched', cleanCopiedLine('') === '')
 }
 
+// 32. dangerous-workspace detection (drive root / home / temp) for the Alt+1 trust guard
+import { isDangerousWorkspaceRoot } from '../packages/bundle/tui/src/shellpanel.ts'
+{
+  const env = { USERPROFILE: 'C:\\Users\\XL', TMP: 'C:\\Users\\XL\\AppData\\Local\\Temp', TEMP: 'C:\\Users\\XL\\AppData\\Local\\Temp' }
+  check('drive root is dangerous', isDangerousWorkspaceRoot('D:', env) === true)
+  check('drive root with slash is dangerous', isDangerousWorkspaceRoot('C:\\', env) === true)
+  check('user home is dangerous', isDangerousWorkspaceRoot('C:\\Users\\XL', env) === true)
+  check('temp dir itself is dangerous', isDangerousWorkspaceRoot('C:\\Users\\XL\\AppData\\Local\\Temp', env) === true)
+  check('normal project dir is safe', isDangerousWorkspaceRoot('D:\\deepseek-harness', env) === false)
+  check('Documents is not the home root itself', isDangerousWorkspaceRoot('C:\\Users\\XL\\Documents', env) === false)
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed === 0 ? 0 : 1)

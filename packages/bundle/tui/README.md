@@ -29,6 +29,10 @@ Slash commands: `/help`, `/setup`, `/model`, `/preset`, `/fork [turn]`, `/new`, 
 
 Model and credentials come from the shared Harness home (`$DSH_HOME/settings.yaml`, `$DSH_HOME/.credentials.yaml`), same as the Web profile; `DEEPSEEK_API_KEY` in the environment also works. The default route is `deepseek-official / deepseek-v4-flash-0731` unless settings override it.
 
+### Sandbox trust (`Alt+1`)
+
+When the session workspace is a **drive root (`D:`), the user home, or the platform temp dir**, the Windows ACL sandbox cannot grant it write access (a whole-disk ACL needs admin rights; a home-root grant would escape into the temp tree). The terminal detects this at boot and defaults such sessions to **read-only**, showing `read-only (Alt+1 trust)` in the status bar. Press **Alt+1** to toggle the session into **workspace-write (trusted)** — the choice is persisted to the session log (`sandbox/mode` event) and survives a restart. In a normal project directory the sandbox uses the deployment default and the status bar stays clean.
+
 ### `/setup` — configure API key / base URL / model from inside the terminal
 
 For a fresh checkout (or to point the terminal at a different provider or gateway), **`/setup`** walks you through the three fields with the modal prompt and persists each one as you go — no file editing needed:

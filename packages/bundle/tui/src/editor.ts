@@ -97,6 +97,8 @@ export interface EditorCallbacks {
   onCycleModel?(): void
   /** Alt+P: cycle to the previous model (reverse of Ctrl+P). */
   onCycleModelReverse?(): void
+  /** Alt+1: toggle the sandbox trust mode (read-only ⇄ workspace-write; caller owns it). */
+  onToggleSandboxTrust?(): void
   /** Ctrl+L: open the interactive model picker (caller owns it). */
   onModelPicker?(): void
   /** Ctrl+F: open transcript search (caller owns it; Esc closes it). */
@@ -316,6 +318,14 @@ export class LineEditor {
       if (ch === '\x1b' && (input[i + 1] === 'p')) {
         // Alt+P: reverse model cycle (Ctrl+Shift+P is eaten by Windows Terminal).
         this.callbacks.onCycleModelReverse?.()
+        i += 2
+        continue
+      }
+      if (ch === '\x1b' && (input[i + 1] === '1')) {
+        // Alt+1: toggle sandbox trust (read-only ⇄ workspace-write). The digit
+        // must be consumed here or it would fall through to the plain-char
+        // insert path and type a literal '1'.
+        this.callbacks.onToggleSandboxTrust?.()
         i += 2
         continue
       }

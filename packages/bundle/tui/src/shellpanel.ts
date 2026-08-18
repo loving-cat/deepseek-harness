@@ -68,6 +68,25 @@ export function renderShellPanel(block: ShellPanelBlock, width: number, expandTo
 const FRAME_OPEN = /^[╭╰┌└├┤┼╞╡]/
 
 /**
+ * Whether a workspace root is dangerous for the Windows ACL sandbox: the
+ * platform temp root inside it would be rejected (`temp root must be outside
+ * the workspace`), or the root is a drive root / user home whose recursive
+ * ACL grant needs admin rights and would escape every child (`grantWrite`
+ * Win32 5). Such roots need an explicit trust decision rather than an
+ * implicit sandbox grant.
+ */
+export function isDangerousWorkspaceRoot(cwd: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  const norm = cwd.replace(/[\\/]+$/, '').toLowerCase()
+  // Drive roots (D:), user home (C:\Users\XL), and the temp dir itself.
+  if (/^[a-z]:$/.test(norm)) return true
+  const home = (env.USERPROFILE ?? env.HOME ?? '').replace(/[\\/]+$/, '').toLowerCase()
+  if (home !== '' && norm === home) return true
+  const temp = (env.TMP ?? env.TEMP ?? '').replace(/[\\/]+$/, '').toLowerCase()
+  if (temp !== '' && (norm === temp || norm.startsWith(temp + '\\') || norm.startsWith(temp + '/'))) return true
+  return false
+}
+
+/**
  * Strip TUI frame characters from a copied row so pasting into another tool
  * yields clean text: content rows lose their leading │ (and one padding
  * space), pure frame rows (╭… ╰… ┌… └… table separators) become empty.
