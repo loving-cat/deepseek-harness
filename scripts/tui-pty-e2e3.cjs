@@ -1,7 +1,19 @@
 // PTY e2e #3: Alt+V image paste (real clipboard) + large-paste collapse marker.
-// Requires an image already on the clipboard (set by the caller).
+const { spawnSync } = require('node:child_process')
 const pty = require(require.resolve('node-pty', { paths: [require('node:path').join(__dirname, '../packages/subprocess/subprocess-local')] }))
 const fs = require('node:fs')
+
+// Put a small test image on the real clipboard first (a prior e2e like #7
+// may have left text there, which would make Alt+V fall back to text paste).
+spawnSync('powershell', ['-NoProfile', '-Command', [
+  'Add-Type -AssemblyName System.Windows.Forms',
+  '$bmp = New-Object System.Drawing.Bitmap 40,30',
+  '$g = [System.Drawing.Graphics]::FromImage($bmp)',
+  '$g.Clear([System.Drawing.Color]::Red)',
+  '$g.Dispose()',
+  '[System.Windows.Forms.Clipboard]::SetImage($bmp)',
+  '$bmp.Dispose()',
+].join('; ')], { timeout: 15000 })
 
 const child = pty.spawn(process.execPath, ['--import', 'tsx/esm', 'apps/cli/src/bin.ts', '--profile', 'tui'], {
   cwd: 'D:/deepseek-harness', cols: 100, rows: 30, env: process.env,
@@ -11,7 +23,7 @@ let mark = 0
 const started = Date.now()
 const bigPaste = Array.from({ length: 12 }, (_, i) => 'pasted line ' + (i + 1)).join('\r\n')
 const steps = [
-  { name: 'boot', wait: /dsh tui[\s\S]*\/help for commands/, send: '\x1bv' }, // Alt+V
+  { name: 'boot', wait: /dsh tui[\s\S]*\/help for commands/, send: '\x1bv', delay: 2500 }, // Alt+V
   { name: 'image path inserted', wait: /dsh-clipboard-[0-9a-f-]+\.png/, send: '\x15' }, // Ctrl+U clear
   { name: 'cleared', wait: null, send: '\x1b[200~' + bigPaste + '\x1b[201~' },
   { name: 'large paste collapsed to marker', wait: /\[paste #1 \+12 lines\]/, send: '\r' },
@@ -31,7 +43,10 @@ function advance() {
     console.log(`[PTY3] step ok: ${step.name} (${((Date.now() - started) / 1000).toFixed(1)}s)`)
     mark = buf.length
     stepIndex++
-    if (step.send !== null) child.write(step.send)
+    if (step.send !== null) {
+      if (step.delay !== undefined) setTimeout(() => child.write(step.send), step.delay)
+      else child.write(step.send)
+    }
   }
 }
 child.onData((d) => { buf += d; advance() })

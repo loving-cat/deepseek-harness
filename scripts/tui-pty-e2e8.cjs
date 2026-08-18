@@ -1,4 +1,7 @@
-// PTY one-off: /model validation — unknown model refused, valid model switches.
+// PTY one-off: /model validation — unknown models are refused. The valid
+// switch path is covered by e2e10 via the /model picker (typed model names
+// match the arg dropdown whose Enter applies-without-submitting, so a typed
+// switch needs an Esc dance that ConPTY delivers unreliably).
 const pty = require(require.resolve('node-pty', { paths: [require('node:path').join(__dirname, '../packages/subprocess/subprocess-local')] }))
 const fs = require('node:fs')
 
@@ -10,8 +13,8 @@ let mark = 0
 const started = Date.now()
 const steps = [
   { name: 'boot', wait: /dsh tui[\s\S]*\/help for commands/, send: '/model deepseek-official /exit\r' },
-  { name: 'unknown model refused', wait: /unknown model "\/exit"[\s\S]*not applied/, send: '/model deepseek-official deepseek-v4-flash\r' },
-  { name: 'valid model applied', wait: /model → deepseek-official \/ deepseek-v4-flash/, send: '/exit\r' },
+  { name: 'unknown model refused', wait: /unknown model "\/exit"[\s\S]*not applied/, send: '/model deepseek-official deepseek-v4-pro-9999\r' },
+  { name: 'second unknown refused', wait: /unknown model "deepseek-v4-pro-9999"[\s\S]*not applied/, send: '/exit\r' },
 ]
 let stepIndex = 0
 const killer = setTimeout(() => {
@@ -23,11 +26,14 @@ const killer = setTimeout(() => {
 function advance() {
   while (stepIndex < steps.length) {
     const step = steps[stepIndex]
-    if (step.wait !== null && !step.wait.test(buf.slice(mark))) return
+    if (step.wait !== undefined && step.wait !== null && !step.wait.test(buf.slice(mark))) return
     console.log(`[PTY8] step ok: ${step.name} (${((Date.now() - started) / 1000).toFixed(1)}s)`)
     mark = buf.length
     stepIndex++
-    if (step.send !== null) child.write(step.send)
+    if (step.send !== null) {
+      if (step.delay !== undefined) setTimeout(() => child.write(step.send), step.delay)
+      else child.write(step.send)
+    }
   }
 }
 child.onData((d) => { buf += d; advance() })

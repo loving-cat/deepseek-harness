@@ -602,7 +602,11 @@ export class LineEditor {
       this.reset()
       this.callbacks.onSubmit(text0)
     } else {
-      this.callbacks.onChange()
+      // An empty submit still reaches onSubmit: a modal picker menu maps it to
+      // the highlighted row (its resolve receives ''); the plain path ignores
+      // empty text. Previously this only called onChange, so the picker's
+      // "empty Enter picks the highlight" could never fire.
+      this.callbacks.onSubmit('')
     }
   }
 

@@ -227,7 +227,7 @@ function feed(rig: Rig, text: string): void { rig.stdin.emit('data', Buffer.from
   feed(rig, '\x7f') // backspace at marker edge: whole marker gone
   check('backspace removes whole marker', rig.editor.value === '')
   feed(rig, '\r')
-  check('marker payload not submitted after deletion', rig.submitted.length === 0)
+  check('marker payload not submitted after deletion', rig.submitted.length === 1 && rig.submitted[0] === '')
 }
 
 // 17. cursor skips markers atomically; ctrl+W respects marker edges
@@ -261,7 +261,7 @@ function feed(rig: Rig, text: string): void { rig.stdin.emit('data', Buffer.from
   feed(rig, '\x15')
   check('ctrl+U clears marker', rig.editor.value === '')
   feed(rig, '\r')
-  check('no submission after ctrl+U', rig.submitted.length === 0)
+  check('no submission after ctrl+U', rig.submitted.length === 1 && rig.submitted[0] === '')
 }
 
 // 19. image-paste shortcut fires callback (Ctrl+V and Alt+V), inserts nothing

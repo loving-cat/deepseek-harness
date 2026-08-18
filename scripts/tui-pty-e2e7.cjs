@@ -12,7 +12,7 @@ let mark = 0
 const started = Date.now()
 const steps = [
   // LLM-independent editor mechanics first (the API is not needed until the last two steps).
-  { name: 'boot', wait: /dsh tui[\s\S]*\/help for commands/, send: '/mo' },
+  { name: 'boot', wait: /dsh tui[\s\S]*\/help for commands/, send: '/model', delay: 2500 },
   // '/mo' filters to exactly /model: 1 dropdown row + 1 input row → row 29 of 30.
   { name: 'dropdown open', wait: /❯\s*(?:\x1b\[[0-9;]*m)*\/model/, send: '\x1b[<0;3;29M' },
   { name: 'mouse click applied /model ', wait: /dsh > (?:\x1b\[[0-9;]*m)*\/model /, send: 'deepseek-o' },
@@ -57,7 +57,10 @@ function advance() {
     console.log(`[PTY7] step ok: ${step.name} (${((Date.now() - started) / 1000).toFixed(1)}s)`)
     mark = buf.length
     stepIndex++
-    if (step.send !== null) child.write(step.send)
+    if (step.send !== null) {
+      if (step.delay !== undefined) setTimeout(() => child.write(step.send), step.delay)
+      else child.write(step.send)
+    }
   }
 }
 child.onData((d) => { buf += d; advance() })

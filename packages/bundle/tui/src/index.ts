@@ -172,8 +172,8 @@ const PROMPT_LABEL = ANSI.green + 'dsh > ' + ANSI.reset
 /** Slash-command catalog powering the editor's autocomplete dropdown. */
 const SLASH_COMMANDS: readonly SuggestItem[] = [
   { value: 'help', description: 'show the command help' },
-  { value: 'model', description: 'show or switch the model — /model <provider> <model> [effort]' },
-  { value: 'preset', description: 'list presets, or switch before the first message — /preset <id>' },
+  { value: 'model', description: 'pick the model from a menu — /model <provider> <model> [effort] types it out' },
+  { value: 'preset', description: 'pick a preset from a menu — /preset <id> types it out' },
   { value: 'mode', description: 'cycle modes (标准/极简/创造…) — /mode switches to the next preset' },
   { value: 'fork', description: 'branch this session — /fork [turn] rewinds to that turn' },
   { value: 'new', description: 'start a fresh session alongside this one' },
@@ -806,10 +806,10 @@ function findToolBlock(view: SessionView, callId: string): ToolBlock | undefined
 const HELP_TEXT = [
   'Commands:',
   '  /help                          show this help',
-  '  /model                         show the current model and the available catalog',
-  '  /model <provider> <model> [effort]   switch model (effort: off | high | max); /model <model> keeps the provider',
-  '  /preset                        list agent presets (standard, code, minimal, cordis)',
-  '  /preset <id>                   switch preset — only before the session\'s first message',
+  '  /model                         pick a provider and model from the menu (current marked)',
+  '  /model <provider> <model> [effort]   switch model directly (effort: off | high | max); /model <model> keeps the provider',
+  '  /preset                        pick an agent preset from the menu (current marked)',
+  '  /preset <id>                   switch preset directly — only before the session\'s first message',
   '  /mode                          cycle to the next mode (标准 → PTC → 极简 → 创造) — blank session only',
   '  Shift+Tab                      cycle reasoning effort (high → max → off → high)',
   '  /fork [turn]                   branch into a child session and switch to it; [turn] rewinds to that turn',
@@ -826,21 +826,55 @@ const HELP_TEXT = [
   'Large pastes collapse into [paste #N …] markers; Ctrl+V / Alt+V pastes an image from the clipboard (path inserted).',
 ].join('\n')
 
-/** /model with no argument: current selection plus the provider catalog. */
-async function showModels(ctx: Context, state: TuiState, write: (text: string) => void): Promise<void> {
-  const current = state.selectionRef?.current
-  const currentText = current === undefined ? '(none)' : current.provider + ' / ' + current.model + (current.reasoningEffort === undefined ? '' : ' (' + current.reasoningEffort + ')')
-  let text = ANSI.bold + 'current' + ANSI.reset + ': ' + currentText + '\n'
+/**
+ * /model with no argument: arrow-navigable picker over the provider catalog,
+ * then over that provider's advertised models. A lone provider skips straight
+ * to the model menu. The choice applies through switchModel, which keeps the
+ * current reasoning effort when none is given (Shift+Tab owns the effort).
+ */
+async function pickModel(ctx: Context, state: TuiState, write: (text: string) => void): Promise<void> {
   const llm = ctx.get('llm')
-  if (llm !== undefined) {
-    for (const entry of llm.listConfigurableProviders()) {
-      const models = await llm.listModels(entry.provider).catch(() => [])
-      text += '  ' + ANSI.cyan + entry.provider + ANSI.reset + (entry.displayName === entry.provider ? '' : ' — ' + entry.displayName) + '\n'
-      for (const model of models) text += '    ' + model.id + (model.name === model.id ? '' : ' — ' + model.name) + '\n'
-    }
+  if (llm === undefined) { write('no llm roster composed'); return }
+  const providers = llm.listConfigurableProviders()
+  if (providers.length === 0) { write('no configurable providers'); return }
+  const current = state.selectionRef?.current
+  let provider: string
+  if (providers.length === 1) {
+    provider = providers[0]?.provider ?? ''
+  } else {
+    const items: MenuItem[] = providers.map(p => ({
+      value: p.provider,
+      text: p.provider + (p.displayName === p.provider ? '' : ' — ' + p.displayName)
+        + (current?.provider === p.provider ? ' ' + ANSI.green + '(current)' + ANSI.reset : ''),
+    }))
+    const picked = (await askUserMenu(state, {
+      title: 'model provider',
+      items,
+      index: Math.max(0, items.findIndex(i => i.value === current?.provider)),
+      footer: '0) cancel · ↑/↓ highlight · Enter picks',
+    })).trim()
+    state.prompt = undefined
+    if (picked === '' || !items.some(i => i.value === picked)) return
+    provider = picked
   }
-  text += ANSI.dim + 'switch: /model <provider> <model> [off|high|max]' + ANSI.reset
-  write(text)
+  // Resolve the model roster up front so the second menu paints fully formed
+  // (it is a network call; a modal menu cannot repaint mid-answer).
+  const models = await llm.listModels(provider).catch(() => [])
+  if (models.length === 0) { write('no models advertised by ' + provider); return }
+  const items: MenuItem[] = models.map(m => ({
+    value: m.id,
+    text: m.id + (m.name === m.id ? '' : ' — ' + m.name)
+      + (current?.provider === provider && current.model === m.id ? ' ' + ANSI.green + '(current)' + ANSI.reset : ''),
+  }))
+  const picked = (await askUserMenu(state, {
+    title: 'model — ' + provider,
+    items,
+    index: Math.max(0, items.findIndex(i => current?.provider === provider && i.value === current.model)),
+    footer: '0) cancel · ↑/↓ highlight · Enter picks',
+  })).trim()
+  state.prompt = undefined
+  if (picked === '' || !items.some(i => i.value === picked)) return
+  switchModel(ctx, state, write, provider + ' ' + picked)
 }
 
 /** /model <provider> <model> [effort]: validate against the catalog, then mutate the live selection and persist. */
@@ -850,8 +884,10 @@ function switchModel(ctx: Context, state: TuiState, write: (text: string) => voi
   let provider: string | undefined
   let model: string | undefined
   let effort: string | undefined
+  // A missing effort inherits the current selection's effort, so a picker-
+  // driven model switch never silently drops the reasoning level.
   if (two === undefined) { provider = current?.provider; model = one }
-  else { provider = one; model = two; effort = three }
+  else { provider = one; model = two; effort = three === undefined ? current?.reasoningEffort : three }
   if (provider === undefined || model === undefined) { write('dsh: usage /model <provider> <model> [effort]'); return }
   if (effort !== undefined && !(REASONING_EFFORTS as readonly string[]).includes(effort)) { write('dsh: effort must be one of off | high | max'); return }
   const llm = ctx.get('llm')
@@ -904,20 +940,27 @@ function cycleEffort(ctx: Context, state: TuiState, write: (text: string) => voi
   write('effort → ' + next + (next === 'off' ? ' (reasoning disabled)' : ''))
 }
 
-/** /preset with no argument: roster with the current preset marked. */
-async function showPresets(ctx: Context, state: TuiState, write: (text: string) => void): Promise<void> {
+/** /preset with no argument: arrow-navigable picker over the preset roster. */
+async function pickPreset(ctx: Context, state: TuiState, write: (text: string) => void): Promise<void> {
   const presets = ctx.get('agentPresets')
   if (presets === undefined) { write('no preset roster composed'); return }
   const list = await presets.list()
-  let text = ANSI.bold + 'current preset' + ANSI.reset + ': ' + (state.presetId ?? presets.defaultId) + '\n'
-  for (const preset of list) {
-    const marker = preset.id === state.presetId ? ANSI.green + '*' + ANSI.reset : ' '
-    const label = preset.name === undefined ? preset.id : preset.id + ' — ' + preset.name
-    const desc = preset.description === undefined ? '' : ' ' + ANSI.dim + preset.description + ANSI.reset
-    text += ' ' + marker + ' ' + label + desc + '\n'
-  }
-  text += ANSI.dim + 'switch: /preset <id> — only before the session\'s first message' + ANSI.reset
-  write(text)
+  if (list.length === 0) { write('no presets composed'); return }
+  const currentId = state.presetId
+  const items: MenuItem[] = list.map(p => ({
+    value: p.id,
+    text: p.id + (p.name === undefined ? '' : ' — ' + p.name)
+      + (p.id === currentId ? ' ' + ANSI.green + '(current)' + ANSI.reset : ''),
+  }))
+  const picked = (await askUserMenu(state, {
+    title: 'agent preset',
+    items,
+    index: Math.max(0, items.findIndex(i => i.value === currentId)),
+    footer: '0) cancel · ↑/↓ highlight · Enter picks',
+  })).trim()
+  state.prompt = undefined
+  if (picked === '' || !items.some(i => i.value === picked)) return
+  await switchPreset(ctx, state, write, picked)
 }
 
 /** /preset <id>: re-link the agent while it has produced nothing. */
@@ -976,9 +1019,9 @@ async function cycleMode(ctx: Context, state: TuiState, write: (text: string) =>
 /** Handle a slash command, returning true when consumed. */
 async function handleCommand(ctx: Context, state: TuiState, write: (text: string) => void, text: string): Promise<boolean> {
   if (text === '/help') { write(HELP_TEXT); return true }
-  if (text === '/model') { await showModels(ctx, state, write); return true }
+  if (text === '/model') { await pickModel(ctx, state, write); return true }
   if (text.startsWith('/model ')) { switchModel(ctx, state, write, text.slice('/model '.length)); return true }
-  if (text === '/preset') { await showPresets(ctx, state, write); return true }
+  if (text === '/preset') { await pickPreset(ctx, state, write); return true }
   if (text.startsWith('/preset ')) { await switchPreset(ctx, state, write, text.slice('/preset '.length)); return true }
   if (text === '/mode') { await cycleMode(ctx, state, write); return true }
   if (text === '/bell') { state.bell = !state.bell; write('turn-end bell: ' + (state.bell ? 'on' : 'off')); return true }

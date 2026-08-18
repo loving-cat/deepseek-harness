@@ -10,10 +10,11 @@ let buf = ''
 let mark = 0
 const started = Date.now()
 const steps = [
-  { name: 'boot', wait: /dsh tui[\s\S]*\/help for commands/, send: '/mo' },
+  { name: 'boot', wait: /dsh tui[\s\S]*\/help for commands/, send: '/model' },
   { name: 'dropdown shows /model highlighted', wait: /❯\s*(?:\x1b\[[0-9;]*m)*\/model/, send: '\t' },
   { name: 'tab filled /model + space', wait: /dsh > (?:\x1b\[[0-9;]*m)*\/model /, send: '\r' },
-  { name: '/model catalog rendered', wait: /switch: \/model <provider>/, send: '/F' },
+  { name: 'enter runs /model → picker opens', wait: /model provider/, send: '\x1b' },
+  { name: 'esc closes the modal menu', wait: /dsh > /, send: '/F' },
   { name: 'uppercase /F → /fork first', wait: /❯\s*(?:\x1b\[[0-9;]*m)*\/fork/, send: '\x1b' },
   { name: 'esc closes dropdown', wait: null, send: null, custom: 'esc' },
   { name: 'dropdown closed', wait: null, send: '\x15', custom: 'escGone' },
