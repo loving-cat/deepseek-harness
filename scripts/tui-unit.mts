@@ -172,6 +172,17 @@ function feed(rig: Rig, text: string): void { rig.stdin.emit('data', Buffer.from
   check('js const keyword', joined.includes('\x1b[35mconst\x1b[0m'))
 }
 
+// 11b. task lists and nested bullets
+{
+  const md = '- [ ] todo A\n- [x] done B\n  - nested C\n    - deeper D'
+  const out = renderMarkdown(md, 60).join('\n')
+  const plain = out.replace(/\x1b\[[0-9;]*m/g, '')
+  check('task unchecked ☐', plain.includes('☐ todo A'))
+  check('task checked ☑', plain.includes('☑ done B'))
+  check('nested bullet ◦', plain.includes('  ◦ nested C'))
+  check('deeper bullet ▪', plain.includes('    ▪ deeper D'))
+}
+
 // 12. wrappedCursor
 {
   const c1 = wrappedCursor('abcde', 3, 2) // ab|cd|e → offset 3 = after 'c' → row1 col1

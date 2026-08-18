@@ -458,11 +458,24 @@ export function renderMarkdown(text: string, width: number): string[] {
       continue
     }
 
+    // GFM task list: '- [ ]' / '- [x]' render as ☐/☑ (checked bright green).
+    const task = /^(\s*)[-*]\s+\[([ xX])\]\s+(.*)$/.exec(line)
+    if (task !== null) {
+      flushParagraph()
+      const indent = ' '.repeat((task[1] ?? '').length)
+      const done = (task[2] ?? '') !== ' '
+      out.push(...wrapAnsi(indent + (done ? ANSI.brightGreen + '☑ ' + ANSI.reset : ANSI.dim + '☐ ' + ANSI.reset) + renderInline(task[3] ?? ''), width))
+      continue
+    }
+
     const ul = /^(\s*)[-*]\s+(.*)$/.exec(line)
     if (ul !== null) {
       flushParagraph()
       const indent = ' '.repeat((ul[1] ?? '').length)
-      out.push(...wrapAnsi(indent + ANSI.brightGreen + '• ' + ANSI.reset + renderInline(ul[2] ?? ''), width))
+      // Nested bullets alternate symbols by indentation depth (• → ◦ → ▪).
+      const depth = Math.floor((ul[1] ?? '').length / 2)
+      const bullet = depth === 0 ? '•' : depth === 1 ? '◦' : '▪'
+      out.push(...wrapAnsi(indent + ANSI.brightGreen + bullet + ' ' + ANSI.reset + renderInline(ul[2] ?? ''), width))
       continue
     }
 
