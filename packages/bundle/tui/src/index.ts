@@ -237,6 +237,7 @@ const SLASH_COMMANDS: readonly SuggestItem[] = [
   { value: 'copy', description: 'copy the last reply to the clipboard (Ctrl+X)' },
   { value: 'name', description: 'name the current session — /name <title> (shown in /sessions)' },
   { value: 'tree', description: 'show the session family tree (fork lineage) and switch' },
+  { value: 'export', description: 'write the current session transcript to a markdown file' },
   { value: 'compact', description: 'compact the conversation context (engine command)' },
   { value: 'auto', description: 'toggle auto-approve for this session' },
   { value: 'bell', description: 'toggle the turn-end bell' },
@@ -1123,6 +1124,7 @@ const HELP_TEXT = [
   '  /bell                          toggle the turn-end bell',
   '  /name <title>                  name the current session (shown in /sessions)',
   '  /tree                          show the session family tree (fork lineage); Enter switches',
+  '  /export                        write the current session transcript to dsh-export-<id>.md',
   '  Ctrl+T                          toggle the thinking (reasoning) display',
   '  Ctrl+P                          cycle to the next model (provider catalog)',
   '  Ctrl+L                          open the model picker menu',
@@ -1363,6 +1365,7 @@ async function handleCommand(ctx: Context, state: TuiState, write: (text: string
   if (text === '/copy') { copyLastReply(state, write); return true }
   if (text.startsWith('/name ')) { nameSession(state, write, text.slice('/name '.length)); return true }
   if (text === '/tree') { await showSessionTree(state, write); return true }
+  if (text === '/export') { exportSession(state, write); return true }
   // Unknown slash command: forward to the engine's command runtime so host
   // commands (/compact, /goal, …) stay reachable from the TUI instead of
   // being shadowed by our own catalog.
@@ -1395,6 +1398,41 @@ async function handleCommand(ctx: Context, state: TuiState, write: (text: string
 /** Structural mirror of the engine command runtime (avoid a new import edge). */
 interface CommandRuntimeLike {
   execute(agent: Agent, line: string, signal: AbortSignal): Promise<{ result: { kind: string; text?: string } } | undefined>
+}
+
+/** /export: write the current session's transcript to a readable markdown file. */
+function exportSession(state: TuiState, write: (text: string) => void): void {
+  const view = currentView(state)
+  if (view === undefined) { write('no current session'); return }
+  const parts: string[] = []
+  for (const b of view.blocks) {
+    switch (b.kind) {
+      case 'user':
+        parts.push('## You\n\n' + b.text)
+        break
+      case 'assistant':
+        if (b.reasoning !== undefined && b.reasoning !== '') parts.push('### thinking\n\n' + b.reasoning)
+        parts.push('## Assistant\n\n' + b.text)
+        break
+      case 'tool':
+        parts.push('### tool: ' + b.name + '\n\n```json\n' + b.args + '\n```')
+        break
+      case 'system':
+        parts.push('> ' + b.text)
+        break
+      default:
+        break
+    }
+    parts.push('')
+  }
+  const content = parts.join('\n')
+  const file = join(process.cwd(), 'dsh-export-' + (state.current ?? 'session').slice(-6) + '.md')
+  try {
+    writeFileSync(file, content, 'utf8')
+    write('exported → ' + file + ' (' + String(content.length) + ' chars)')
+  } catch (error: unknown) {
+    write('dsh: export failed: ' + (error instanceof Error ? error.message : String(error)))
+  }
 }
 
 /**
