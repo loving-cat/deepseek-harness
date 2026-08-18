@@ -599,6 +599,23 @@ function feed(rig: Rig, text: string): void { rig.stdin.emit('data', Buffer.from
   check('formatCache small', formatCache(45000) === ' · 缓存 45k')
   check('formatCache exact thousand', formatCache(1200) === ' · 缓存 1.2k')
   check('formatCache millions', formatCache(1_500_000) === ' · 缓存 1.5M')
+  check('formatCache ratio', formatCache(45_000, 50_000) === ' · 缓存 45k (90%)')
+  check('formatCache ratio caps at 100', formatCache(45_000, 30_000) === ' · 缓存 45k (100%)')
+  check('formatCache ratio hides with zero total', formatCache(10, 0) === ' · 缓存 10')
+}
+
+// 25b. table delimiters: compact rows without spaces must still be tables
+{
+  const md = '| A | B | C |\n|---|---|---|\n| 1 | 2 | 3 |'
+  const out = renderMarkdown(md, 60).join('\n')
+  check('compact 3-col table recognized (├ border)', out.includes('├'))
+  check('compact table keeps cells', out.includes('1') && out.includes('2') && out.includes('3'))
+  const md2 = '| A | B |\n|---|:---:|\n| x | y |'
+  const out2 = renderMarkdown(md2, 60).join('\n')
+  check('compact 2-col with colons recognized', out2.includes('├'))
+  const md3 = '| A |\n| --- |\n| 1 |'
+  const out3 = renderMarkdown(md3, 60).join('\n')
+  check('single-col table recognized', out3.includes('├'))
 }
 
 // 26. row-diff rendering: first frame repaints, later frames write only changes

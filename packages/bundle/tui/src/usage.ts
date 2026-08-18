@@ -50,9 +50,12 @@ export function formatTokens(n: number): string {
 }
 
 /**
- * Status-bar segment for prompt-cache hits: `' · 缓存 45k'`, or '' when the
+ * Status-bar segment for prompt-cache hits: `' · 缓存 45k (84%)'` (percentage
+ * of billed input served from cache when `total` is given), or '' when the
  * counter is zero (a first call with no cache reads shows nothing).
  */
-export function formatCache(n: number): string {
-  return n === 0 ? '' : ' · 缓存 ' + formatTokens(n)
+export function formatCache(n: number, total?: number): string {
+  if (n <= 0) return ''
+  const pct = total === undefined || total <= 0 ? '' : ' (' + String(Math.min(100, Math.round((n / total) * 100))) + '%)'
+  return ' · 缓存 ' + formatTokens(n) + pct
 }

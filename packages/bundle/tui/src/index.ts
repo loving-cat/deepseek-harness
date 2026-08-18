@@ -372,9 +372,15 @@ function renderBlock(block: Block, width: number, expandTools: boolean, showReas
       const out: string[] = []
       if (block.reasoning !== undefined && block.reasoning !== '' && showReasoning) {
         // Muted light-gray italic thinking block (pi style), inline elements
-        // restore the gray base instead of dropping it.
+        // restore the gray base instead of dropping it. wrapAnsi soft-wraps
+        // and only the FIRST line carries the base prefix; later lines rely on
+        // terminal style inheritance, which row-diff rendering cannot
+        // guarantee (a rewrapped line is emitted standalone). Re-apply the
+        // base prefix to every line so reasoning never falls back to the
+        // reply's default color.
         const base = ANSI.gray + ANSI.italic
-        out.push(...wrapAnsi(base + renderInline(block.reasoning, base) + ANSI.reset, width))
+        const reasoningLines = wrapAnsi(base + renderInline(block.reasoning, base) + ANSI.reset, width)
+        reasoningLines.forEach((line, i) => { out.push(i === 0 ? line : base + line) })
         out.push('')
       }
       out.push(...renderMarkdown(block.text, width))
@@ -410,13 +416,13 @@ function buildStatus(state: TuiState, width: number): string {
     const elapsed = view.turnStartedAt === undefined ? '' : ' ' + String(Math.floor((Date.now() - view.turnStartedAt) / 1000)) + 's'
     const inTok = billedInput(view.turnUsage)
     const tokens = inTok + view.turnUsage.output === 0 ? '' : ' ↑' + formatTokens(inTok) + ' ↓' + formatTokens(view.turnUsage.output)
-    const cache = formatCache(view.turnUsage.cacheRead)
+    const cache = formatCache(view.turnUsage.cacheRead, billedInput(view.turnUsage))
     const queued = view.pending.length === 0 ? '' : ' · +' + String(view.pending.length) + ' queued'
     activity = ANSI.brightYellow + ' ' + spin + elapsed + tokens + cache + queued + ANSI.reset
   } else {
     const inTok = view === undefined ? 0 : billedInput(view.usage)
     const totals = view === undefined || (inTok === 0 && view.usage.output === 0) ? '' : ' · ↑' + formatTokens(inTok) + ' ↓' + formatTokens(view.usage.output)
-    const cache = view === undefined ? '' : formatCache(view.usage.cacheRead)
+    const cache = view === undefined ? '' : formatCache(view.usage.cacheRead, billedInput(view.usage))
     const window = state.contextWindow
     const total = view === undefined ? 0 : billedInput(view.usage)
     // Cumulative billed input over the window (a long conversation must grow

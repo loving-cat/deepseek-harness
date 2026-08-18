@@ -298,7 +298,10 @@ function isTableDelimiter(line: string): boolean {
   const core = line.trim().replace(/^\|/, '').replace(/\|$/, '')
   if (core === '') return false
   const cells = core.split('|')
-  return cells.every(cell => /^\s*:?-{3,}:?\s*$/.test(cell))
+  // -{2,} (not -{3,}): stripping the outer pipes of a compact row like
+  // '|---|---|---|' leaves a trailing segment of only two dashes; requiring
+  // three would silently turn such tables into plain paragraph text.
+  return cells.every(cell => /^\s*:?-{2,}:?\s*$/.test(cell))
 }
 
 /** Split one table row into trimmed cells (outer pipes dropped). */
