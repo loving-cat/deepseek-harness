@@ -2189,6 +2189,17 @@ export function apply(ctx: Context, config: Config): void {
       }
       return
     }
+    // Engine-extension event outside SessionEventMap (the compaction package's
+    // declare-module patch is not importable here): fold the summary inline.
+    if (event.type === 'compaction/summary' as never) {
+      const data = (event as { data?: unknown }).data as { shadowedTokenCount?: number; summary?: unknown }
+      const compacted = data.shadowedTokenCount ?? 0
+      view.blocks.push({ kind: 'system', text: '⎘ context compacted' + (compacted > 0 ? ' (' + formatTokens(compacted) + ' tokens shadowed)' : '') })
+      const summary = messageText(data.summary)
+      if (summary !== '') view.blocks.push({ kind: 'assistant', text: summary })
+      if (isCurrent) draw(state, throttle)
+      return
+    }
     switch (event.type) {
       case 'turn/start':
         view.busy = true
