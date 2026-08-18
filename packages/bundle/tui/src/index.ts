@@ -1940,7 +1940,15 @@ function setupFullScreen(
     },
     onCycleModel() { void cycleModel(ctx, state, (t) => { addSystem(state, t, throttle) }) },
     onModelPicker() { void pickModel(ctx, state, (t) => { addSystem(state, t, throttle) }) },
-    onExternalEditor() { openExternalEditor(state, throttle) },
+    onExternalEditor() {
+      // The external-editor hand-over swaps the whole terminal; refuse while a
+      // modal prompt, search, or selection owns the screen (state would leak).
+      if (state.prompt !== undefined || state.search !== undefined || state.selection !== undefined) {
+        addSystem(state, 'close the current prompt/search before using the external editor (Ctrl+G)', throttle)
+        return
+      }
+      openExternalEditor(state, throttle)
+    },
     onToggleExpand() {
       state.expandTools = !state.expandTools
       state.renderCache.clear() // tool expansion changes every tool block's rows

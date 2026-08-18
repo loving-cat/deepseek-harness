@@ -93,7 +93,19 @@ function visibleWidth(s: string): number {
 /** Render one file diff to styled lines (code stays verbatim, clipped to width). */
 export function renderDiff(diff: FileDiff, width: number): string[] {
   const inner = Math.max(1, width - 2)
-  const clip = (s: string): string => (s.length > inner ? s.slice(0, inner) : s)
+  // Clip by VISIBLE width so wide (CJK) lines cannot overflow the row and
+  // push the terminal into wrapping; the padding math below uses the same rule.
+  const clip = (s: string): string => {
+    let w = 0
+    let i = 0
+    while (i < s.length) {
+      const cw = charWidth(s[i] ?? '')
+      if (w + cw > inner) break
+      w += cw
+      i += 1
+    }
+    return s.slice(0, i)
+  }
   const out: string[] = []
   const oldLines = diff.oldText === null ? [] : diff.oldText.split('\n')
   const newLines = diff.newText.split('\n')
