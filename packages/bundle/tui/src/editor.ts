@@ -95,6 +95,8 @@ export interface EditorCallbacks {
   onCycleModel?(): void
   /** Ctrl+L: open the interactive model picker (caller owns it). */
   onModelPicker?(): void
+  /** Ctrl+F: open transcript search (caller owns it; Esc closes it). */
+  onSearch?(): void
 }
 
 /** One slash-command suggestion row. */
@@ -369,6 +371,7 @@ export class LineEditor {
       if (ch === '\x16') { this.callbacks.onPasteImage?.(); i += 1; continue }
       if (ch === '\x17') { this.deleteWordBackward(); i += 1; continue }
       if (ch === '\x0c') { this.callbacks.onModelPicker?.(); i += 1; continue } // Ctrl+L
+      if (ch === '\x06') { this.callbacks.onSearch?.(); i += 1; continue } // Ctrl+F
       if (ch === '\x0f') { this.callbacks.onToggleExpand?.(); i += 1; continue }
       if (ch === '\x07') { this.callbacks.onExternalEditor?.(); i += 1; continue }
       if (ch === '\x18') { this.callbacks.onCopy?.(); i += 1; continue }

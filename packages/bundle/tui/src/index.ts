@@ -153,6 +153,18 @@ interface TuiState {
   /** Explicit user names for sessions (/name), keyed by String(session.id). */
   titles: Map<string, string>
   /**
+   * Ctrl+F transcript search: query, matched block indexes (oldest first),
+   * and the currently focused match. Undefined = search closed. While open
+   * the editor's input is the query and Enter jumps to the next match.
+   */
+  search: { query: string; matches: number[]; current: number } | undefined
+  /** Last search query, re-offered on the next Ctrl+F. */
+  searchMemory: string
+  /** First body line index of each block (kept by renderFrame for jump-to-match). */
+  blockStarts: number[]
+  /** Epoch ms of the last idle Ctrl+C (double-press quits; single clears input). */
+  idleInterruptAt: number | undefined
+  /**
    * App-internal mouse text selection: 0-based screen anchor/focus rows and
    * cols (row 0 = status bar, body starts at row 2). Left-drag sets it, the
    * renderer highlights the box, right-click copies it. Undefined = no box.
@@ -365,12 +377,32 @@ function renderFrame(state: TuiState): { lines: string[]; cursorRow: number; cur
   const height = term.height
   const view = currentView(state)
   const body: string[] = []
-  for (const block of view?.blocks ?? []) {
-    body.push(...renderBlock(block, width, state.expandTools, state.showReasoning))
+  const blockStarts: number[] = []
+  const search = state.search
+  const blocks = view?.blocks ?? []
+  for (let bi = 0; bi < blocks.length; bi += 1) {
+    const block = blocks[bi]
+    if (block === undefined) continue
+    blockStarts.push(body.length)
+    const rendered = renderBlock(block, width, state.expandTools, state.showReasoning)
+    // Search hits get a gutter marker; the focused one is bright and bold.
+    if (search !== undefined && search.query !== '' && search.matches.includes(bi)) {
+      const marker = bi === search.matches[search.current]
+        ? ANSI.brightCyan + ANSI.bold + '▍' + ANSI.reset
+        : ANSI.dim + '·' + ANSI.reset
+      rendered[0] = marker + ' ' + (rendered[0] ?? '')
+    }
+    body.push(...rendered)
     body.push('')
   }
+  state.blockStarts = blockStarts
   const editor = state.editor
-  const label = state.prompt !== undefined ? state.prompt.label : PROMPT_LABEL
+  const label = state.prompt !== undefined ? state.prompt.label
+    : search !== undefined
+      ? ANSI.brightYellow + '🔍 ' + ANSI.reset
+        + (search.matches.length === 0 && search.query !== '' ? ANSI.dim + '(no matches) ' + ANSI.reset : '')
+        + (search.matches.length === 0 ? '' : ANSI.dim + String(search.current + 1) + '/' + String(search.matches.length) + ' ' + ANSI.reset)
+      : PROMPT_LABEL
   const value = editor === undefined ? '' : editor.value
   // Input area: prompt label + editor value, soft-wrapped to the terminal width
   // (wrapAnsi keeps hard newlines and breaks long lines at `width`).
@@ -577,6 +609,40 @@ function copySelection(state: TuiState, notify: (text: string) => void): void {
   })
 }
 
+/** Block indexes whose stripped text contains the query (case-insensitive), oldest first. */
+function computeMatches(view: SessionView | undefined, query: string): number[] {
+  const q = query.toLowerCase()
+  if (q === '' || view === undefined) return []
+  const out: number[] = []
+  view.blocks.forEach((b, i) => {
+    const text = (b.kind === 'tool' ? b.name + ' ' + b.args : b.text).toLowerCase()
+    if (text.includes(q)) out.push(i)
+  })
+  return out
+}
+
+/** Scroll the current match's block into view (its first line near the top of the body window). */
+function jumpToMatch(state: TuiState): void {
+  const s = state.search
+  const view = currentView(state)
+  if (s === undefined || view === undefined) return
+  const bi = s.matches[s.current]
+  if (bi === undefined) return
+  const start = state.blockStarts[bi]
+  if (start === undefined) return
+  view.scroll = Math.max(0, start - 2)
+}
+
+/** Move the search focus by delta (wrapping) and scroll to the hit. */
+function moveMatch(state: TuiState, delta: number, throttle: Throttle): void {
+  const s = state.search
+  if (s === undefined || s.matches.length === 0) return
+  const n = s.matches.length
+  s.current = ((s.current + delta) % n + n) % n
+  jumpToMatch(state)
+  draw(state, throttle)
+}
+
 /** Ctrl+G: hand the terminal to $EDITOR (notepad on win32) and take the file back as input. */
 function openExternalEditor(state: TuiState, throttle: Throttle): void {
   const editor = state.editor
@@ -630,8 +696,9 @@ function menuLabel(menu: PendingMenu): string {
  */
 function askUserMenu(state: TuiState, menu: PendingMenu): Promise<string> {
   return new Promise((resolve) => {
+    // A modal prompt owns the input: no search overlay, no slash-command dropdown.
+    state.search = undefined
     state.prompt = { label: menuLabel(menu), resolve, menu }
-    // A modal prompt owns the input: no slash-command dropdown on top of it.
     if (state.editor !== undefined) state.editor.suggestEnabled = false
     state.editor?.reset()
     state.term?.render(renderFrame(state))
@@ -661,6 +728,7 @@ function navigatePromptMenu(state: TuiState, delta: -1 | 1): boolean {
  */
 function askUserDeferred(state: TuiState, label: Promise<string>): Promise<string> {
   return new Promise((resolve) => {
+    state.search = undefined // a modal owns the input; search overlay off
     state.prompt = { label: '', resolve, menu: undefined }
     // A modal prompt owns the input: no slash-command dropdown on top of it.
     if (state.editor !== undefined) state.editor.suggestEnabled = false
@@ -901,7 +969,8 @@ const HELP_TEXT = [
   '  Ctrl+L                          open the model picker menu',
   '  /auto                          toggle auto-approve for this session (approval prompts answer themselves)',
   '  /sessions                      switch between live sessions or resume a persisted one',
-  '  /exit                          flush the session and quit (also Ctrl+C at idle, Ctrl+D on empty)',
+  '  /exit                          flush the session and quit (Ctrl+C at idle: clears input, double-press quits)',
+  '  Ctrl+F                          search the transcript (Enter/↑↓ next, Esc closes)',
   'While the agent works, Ctrl+C interrupts; typing then Enter queues a follow-up (Alt+Up recalls it); Ctrl+O expands tool output.',
   'Editor: / opens command autocomplete (also completes @file-paths and command args); click or Tab completes; Enter runs.',
   'Ctrl+Z undo · Ctrl+Y yank · Ctrl+X copy last reply · Ctrl+G external editor ($EDITOR).',
@@ -1443,6 +1512,8 @@ function setupFullScreen(
 
   const editor = new LineEditor({
     onSubmit(text) {
+      // Search mode: Enter jumps to the next match instead of submitting.
+      if (state.search !== undefined) { moveMatch(state, 1, throttle); return }
       if (state.prompt !== undefined) {
         const p = state.prompt
         state.prompt = undefined
@@ -1500,14 +1571,30 @@ function setupFullScreen(
         return
       }
       const current = currentView(state)
-      if (current !== undefined && current.busy) { current.agent.cancel({ kind: 'user' }); addSystem(state, '(interrupting…)', throttle) }
-      else { quit(0) }
+      if (current !== undefined && current.busy) { current.agent.cancel({ kind: 'user' }); addSystem(state, '(interrupting…)', throttle); return }
+      // Idle Ctrl+C: a first press clears any typed input; with an empty
+      // editor a second press within 2s quits. One accidental press must
+      // never close the app (the copy habit from other terminals).
+      if (editor.value !== '') { editor.reset(); addSystem(state, '(input cleared — Ctrl+C again to quit)', throttle); return }
+      const now = Date.now()
+      if (state.idleInterruptAt !== undefined && now - state.idleInterruptAt < 2000) { quit(0); return }
+      state.idleInterruptAt = now
+      addSystem(state, '(press Ctrl+C again to quit)', throttle)
     },
-    // Lone Esc (no dropdown): a modal prompt/picker claims Esc first (close
-    // and resolve an empty answer = cancel / reject), and only with no modal
-    // open does Esc interrupt the running model. Esc never quits, unlike
-    // Ctrl+C which quits the app when idle.
+    // Lone Esc: search closes first, then a modal prompt/picker (close and
+    // resolve an empty answer = cancel / reject); only with neither open does
+    // Esc interrupt the running model. Esc never quits, unlike Ctrl+C's
+    // double-press at idle.
     onEsc() {
+      if (state.search !== undefined) {
+        state.searchMemory = state.search.query
+        state.search = undefined
+        state.editor?.reset()
+        if (state.editor !== undefined) state.editor.suggestEnabled = true
+        state.selection = undefined
+        draw(state, throttle)
+        return
+      }
       if (state.prompt !== undefined) {
         const p = state.prompt
         state.prompt = undefined
@@ -1521,7 +1608,37 @@ function setupFullScreen(
       if (current !== undefined && current.busy) { current.agent.cancel({ kind: 'user' }); addSystem(state, '(interrupting…)', throttle) }
     },
     onEof() { quit(0) },
-    onChange() { draw(state, throttle) },
+    onChange() {
+      // Search mode: the editor input is the query, recomputed live.
+      if (state.search !== undefined) {
+        state.search.query = editor.value
+        state.search.matches = computeMatches(currentView(state), editor.value)
+        state.search.current = 0
+        jumpToMatch(state)
+      }
+      draw(state, throttle)
+    },
+    onSearch() {
+      if (state.search !== undefined) {
+        // Ctrl+F while open restarts the query empty.
+        state.search.query = ''
+        state.search.matches = []
+        state.search.current = 0
+        editor.fill('')
+        draw(state, throttle)
+        return
+      }
+      state.search = {
+        query: state.searchMemory,
+        matches: computeMatches(currentView(state), state.searchMemory),
+        current: 0,
+      }
+      // The editor owns the query; suggest is off so '/' and '@' type literally.
+      editor.suggestEnabled = false
+      editor.fill(state.searchMemory)
+      jumpToMatch(state)
+      draw(state, throttle)
+    },
     onPasteImage() { void pasteFromClipboard(state) },
     onSuggest: () => SLASH_COMMANDS,
     onSuggestFiles: () => {
@@ -1572,6 +1689,7 @@ function setupFullScreen(
       return []
     },
     onMousePress(col, row) {
+      if (state.search !== undefined) { state.selection = undefined; draw(state, throttle); return }
       const rows = state.suggestRows
       if (rows !== undefined && row >= rows.start && row < rows.start + rows.count) {
         editor.applySuggestAt(row - rows.start)
@@ -1648,8 +1766,16 @@ function setupFullScreen(
     },
     // Modal picker menus consume the arrows; with no menu open the editor
     // falls back to its own history navigation.
-    onArrowUp() { return navigatePromptMenu(state, -1) },
-    onArrowDown() { return navigatePromptMenu(state, 1) },
+    // Search mode: arrows move between matches; modal pickers consume them;
+    // otherwise the editor falls back to its own history navigation.
+    onArrowUp() {
+      if (state.search !== undefined) { moveMatch(state, -1, throttle); return true }
+      return navigatePromptMenu(state, -1)
+    },
+    onArrowDown() {
+      if (state.search !== undefined) { moveMatch(state, 1, throttle); return true }
+      return navigatePromptMenu(state, 1)
+    },
   })
   state.editor = editor
   editor.start()
@@ -1704,6 +1830,7 @@ export function apply(ctx: Context, config: Config): void {
     suggestRows: undefined, fileCache: undefined, modelArgsCache: new Map(), presetArgsCache: undefined,
     autoApprove: new Set(),
     showReasoning: true, titles: new Map(),
+    search: undefined, searchMemory: '', blockStarts: [], idleInterruptAt: undefined,
     selection: undefined, bodyText: undefined, bodyRows: undefined,
   }
   const throttle: Throttle = { last: 0, timer: undefined }
