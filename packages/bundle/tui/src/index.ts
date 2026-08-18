@@ -235,6 +235,7 @@ const SLASH_COMMANDS: readonly SuggestItem[] = [
   { value: 'copy', description: 'copy the last reply to the clipboard (Ctrl+X)' },
   { value: 'name', description: 'name the current session — /name <title> (shown in /sessions)' },
   { value: 'tree', description: 'show the session family tree (fork lineage) and switch' },
+  { value: 'compact', description: 'compact the conversation context (engine command)' },
   { value: 'auto', description: 'toggle auto-approve for this session' },
   { value: 'bell', description: 'toggle the turn-end bell' },
   { value: 'sessions', description: 'switch between live sessions or resume a persisted one' },
@@ -1306,7 +1307,38 @@ async function handleCommand(ctx: Context, state: TuiState, write: (text: string
   if (text === '/copy') { copyLastReply(state, write); return true }
   if (text.startsWith('/name ')) { nameSession(state, write, text.slice('/name '.length)); return true }
   if (text === '/tree') { await showSessionTree(state, write); return true }
+  // Unknown slash command: forward to the engine's command runtime so host
+  // commands (/compact, /goal, …) stay reachable from the TUI instead of
+  // being shadowed by our own catalog.
+  if (text.startsWith('/')) {
+    const view = currentView(state)
+    const commands = ctx.get('commands') as CommandRuntimeLike | undefined
+    if (view !== undefined && commands !== undefined) {
+      try {
+        const exec = await commands.execute(view.agent, text, new AbortController().signal)
+        if (exec !== undefined) {
+          const r = exec.result
+          if (r.kind === 'success') {
+            if (r.text !== undefined && r.text !== '') write(r.text)
+          } else {
+            write('dsh: ' + (r.text ?? ''))
+          }
+          return true
+        }
+      } catch (error: unknown) {
+        write('dsh: ' + (error instanceof Error ? error.message : String(error)))
+        return true
+      }
+    }
+    write('unknown command — /help lists them all')
+    return true
+  }
   return false
+}
+
+/** Structural mirror of the engine command runtime (avoid a new import edge). */
+interface CommandRuntimeLike {
+  execute(agent: Agent, line: string, signal: AbortSignal): Promise<{ result: { kind: string; text?: string } } | undefined>
 }
 
 /**
