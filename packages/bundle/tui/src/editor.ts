@@ -85,6 +85,8 @@ export interface EditorCallbacks {
   onMouseUp?(): void
   /** SGR right-button press (the caller copies a selection, if any). */
   onRightClick?(col: number, row: number): void
+  /** Space in a modal picker menu: toggle the highlighted row (multi-select). */
+  onMenuToggle?(): boolean
   /** Ctrl+X: copy the last reply to the clipboard (caller owns it). */
   onCopy?(): void
   /** Ctrl+G: open the external editor (caller owns the terminal hand-over). */
@@ -379,6 +381,7 @@ export class LineEditor {
       if (ch === '\x1a') { this.undo(); i += 1; continue }
       if (ch === '\x14') { this.callbacks.onToggleReasoning?.(); i += 1; continue } // Ctrl+T
       if (ch === '\x10') { this.callbacks.onCycleModel?.(); i += 1; continue } // Ctrl+P
+      if (ch === ' ' && this.callbacks.onMenuToggle?.() === true) { i += 1; continue }
       // Printable character (also covers pasted multi-byte text).
       this.insert(ch)
       i += 1

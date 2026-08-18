@@ -1,4 +1,6 @@
-// PTY e2e #6 (phase-1): tool-call render → approval → Ctrl+O expand → usage stats.
+// PTY e2e #6 (count-mode): tool-call render → turn done → Ctrl+O expand → usage
+// stats. Counts text features over the whole buffer (diff rendering changes
+// byte layout, so byte-marks are unreliable).
 const pty = require(require.resolve('node-pty', { paths: [require('node:path').join(__dirname, '../packages/subprocess/subprocess-local')] }))
 const fs = require('node:fs')
 
@@ -6,13 +8,18 @@ const child = pty.spawn(process.execPath, ['--import', 'tsx/esm', 'apps/cli/src/
   cwd: 'D:/deepseek-harness', cols: 100, rows: 30, env: process.env,
 })
 let buf = ''
-let mark = 0
 const started = Date.now()
+const count = (re) => (buf.match(new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g')) || []).length
 const steps = [
-  { name: 'boot', wait: /dsh tui[\s\S]*\/help for commands/, send: 'Use the pwsh tool to run exactly: echo DSH_TOOL_OK — then reply with the word done.\r' },
-  { name: 'tool call rendered', wait: /● (pwsh|bash|shell)/, send: null },
-  { name: 'turn done', wait: /○ idle/, send: '\x0f' }, // Ctrl+O
-  { name: 'usage stats + expanded args + hint', wait: /↑[\d.]+[kM]? ↓[\d.]+[kM]?[\s\S]*"command"[\s\S]*tool output: expanded/, send: '/exit\r' },
+  { name: 'boot', need: () => count(/\/help for commands/) >= 1 },
+  { name: 'tool task', send: 'Use the pwsh tool to run exactly: echo DSH_TOOL_OK — then reply with the word done.\r', delay: 2500 },
+  { name: 'tool call rendered', need: () => count(/● (?:pwsh|bash|shell)/) >= 1 },
+  { name: 'turn done', need: () => count(/○ idle/) >= 1 },
+  { name: 'Ctrl+O expand', send: '\x0f', delay: 300 },
+  // Each feature independently (a diff frame does not repeat unchanged rows,
+  // so a single ordered [\s\S]* scan over stale frames is unreliable).
+  { name: 'usage stats + expanded args + hint', need: () => count(/↑[\d.]+[kM]? ↓[\d.]+[kM]?/) >= 1 && count(/"command"/) >= 1 && count(/tool output: expanded/) >= 1 },
+  { name: 'exit', send: '\x15/exit\r', delay: 300 },
 ]
 let stepIndex = 0
 const killer = setTimeout(() => {
@@ -24,11 +31,13 @@ const killer = setTimeout(() => {
 function advance() {
   while (stepIndex < steps.length) {
     const step = steps[stepIndex]
-    if (step.wait !== null && !step.wait.test(buf.slice(mark))) return
+    if (step.need !== undefined && !step.need()) return
     console.log(`[PTY6] step ok: ${step.name} (${((Date.now() - started) / 1000).toFixed(1)}s)`)
-    mark = buf.length
     stepIndex++
-    if (step.send !== null) child.write(step.send)
+    if (step.send !== undefined) {
+      if (step.delay !== undefined) setTimeout(() => child.write(step.send), step.delay)
+      else child.write(step.send)
+    }
   }
 }
 child.onData((d) => { buf += d; advance() })

@@ -1,5 +1,7 @@
-// PTY e2e #5 (phase-1): busy spinner + elapsed seconds, follow-up queue + Alt+Up
-// recall, /new session, window-title OSC, taskbar progress OSC, /bell toggle.
+// PTY e2e #5 (phase-1, count-mode): busy spinner + elapsed seconds, follow-up
+// queue + Alt+Up recall, /new session, window-title OSC, taskbar progress OSC,
+// /bell toggle. Counts text features over the whole buffer (diff rendering
+// changes byte layout, so byte-marks are unreliable).
 const pty = require(require.resolve('node-pty', { paths: [require('node:path').join(__dirname, '../packages/subprocess/subprocess-local')] }))
 const fs = require('node:fs')
 
@@ -7,23 +9,31 @@ const child = pty.spawn(process.execPath, ['--import', 'tsx/esm', 'apps/cli/src/
   cwd: 'D:/deepseek-harness', cols: 100, rows: 30, env: process.env,
 })
 let buf = ''
-let mark = 0
 const started = Date.now()
+const count = (re) => (buf.match(new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g')) || []).length
 const steps = [
-  { name: 'boot', wait: /dsh tui[\s\S]*\/help for commands/, send: 'Write a 400-word essay about the ocean.\r' },
-  { name: 'busy spinner + progress OSC', wait: /[⠋⠙⠹⠸⠼⠴⦾⦿]/, send: null },
-  { name: 'elapsed seconds tick', wait: /[⠋⠙⠹⠸⠼⠴⦾⦿] \d+s/, send: 'Now write 400 more words about mountains.\r' },
-  { name: 'busy submit queued', wait: /queued \(1\)/, send: null },
+  { name: 'boot', need: () => count(/\/help for commands/) >= 1 },
+  { name: 'task 1', send: 'Write a 400-word essay about the ocean.\r', delay: 2500 },
+  { name: 'busy spinner + progress OSC', need: () => count(/[⠋⠙⠹⠸⠼⠴⦾⦿]/) >= 1 },
+  { name: 'elapsed seconds tick', need: () => count(/[⠋⠙⠹⠸⠼⠴⦾⦿] \d+s/) >= 1 },
+  // Queued while busy: the input is NOT rendered as a user block yet.
+  { name: 'task 2 (queues)', send: 'Now write 400 more words about mountains.\r', delay: 300 },
+  { name: 'busy submit queued', need: () => count(/queued \(1\)/) >= 1 },
   // turn/end + pending flush happen in one handler: the queued user block IS the turn-1-end proof.
-  { name: 'queued follow-up auto-sent', wait: /❯[\s\S]*400 more words about mountains/, send: null },
-  { name: 'turn 2 running', wait: /[⠋⠙⠹⠸⠼⠴⦾⦿] \d+s/, send: 'recall me please\r' },
-  { name: 'second queue parked', wait: /queued \(1\)/, send: '\x1b[1;3A' }, // Alt+Up
-  { name: 'queue recalled into editor', wait: /recalled the queue/, send: null },
-  { name: 'editor holds recalled text', wait: /dsh > (?:\x1b\[[0-9;]*m)*recall me please/, send: '\x15' },
-  { name: 'cleared', wait: null, send: '/new\r' },
-  { name: 'fresh session live', wait: /new session →/, send: null },
-  { name: 'status counts 2 sessions', wait: /⇄ 2 sessions/, send: '/bell\r' },
-  { name: 'bell toggled', wait: /turn-end bell: off/, send: '/exit\r' },
+  { name: 'queued follow-up auto-sent', need: () => count(/❯[\s\S]*400 more words about mountains/) >= 1 },
+  // Second queue proves turn 2 is running (only a busy agent parks a follow-up).
+  { name: 'queue again', send: 'recall me please\r', delay: 300 },
+  { name: 'second queue parked', need: () => count(/queued \(1\)/) >= 2 },
+  { name: 'Alt+Up recall', send: '\x1b[1;3A', delay: 300 },
+  { name: 'queue recalled into editor', need: () => count(/recalled the queue/) >= 1 },
+  { name: 'editor holds recalled text', need: () => count(/dsh > (?:\x1b\[[0-9;]*m)*recall me please/) >= 1 },
+  { name: 'clear', send: '\x15', delay: 300 },
+  { name: '/new', send: '/new\r', delay: 300 },
+  { name: 'fresh session live', need: () => count(/new session →/) >= 1 },
+  { name: 'status counts 2 sessions', need: () => count(/⇄ 2 sessions/) >= 1 },
+  { name: '/bell', send: '/bell\r', delay: 300 },
+  { name: 'bell toggled', need: () => count(/turn-end bell: off/) >= 1 },
+  { name: 'exit', send: '\x15/exit\r', delay: 300 },
 ]
 let stepIndex = 0
 const killer = setTimeout(() => {
@@ -35,11 +45,13 @@ const killer = setTimeout(() => {
 function advance() {
   while (stepIndex < steps.length) {
     const step = steps[stepIndex]
-    if (step.wait !== null && !step.wait.test(buf.slice(mark))) return
+    if (step.need !== undefined && !step.need()) return
     console.log(`[PTY5] step ok: ${step.name} (${((Date.now() - started) / 1000).toFixed(1)}s)`)
-    mark = buf.length
     stepIndex++
-    if (step.send !== null) child.write(step.send)
+    if (step.send !== undefined) {
+      if (step.delay !== undefined) setTimeout(() => child.write(step.send), step.delay)
+      else child.write(step.send)
+    }
   }
 }
 child.onData((d) => { buf += d; advance() })

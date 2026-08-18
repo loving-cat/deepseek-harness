@@ -78,6 +78,10 @@ interface PendingMenu {
   items: readonly MenuItem[]
   index: number
   footer: string
+  /** Multi-select mode: space toggles the highlighted row; Enter submits all checked. */
+  multi: boolean
+  /** Per-row checked state (multi only; the caller initializes it). */
+  checked: boolean[]
 }
 
 /** An inline prompt awaiting one line of input (approval / user question / picker). */
@@ -681,9 +685,12 @@ function askUser(state: TuiState, label: string): Promise<string> {
 function menuLabel(menu: PendingMenu): string {
   let out = ANSI.bold + menu.title + ANSI.reset + '\n'
   menu.items.forEach((item, i) => {
+    const box = menu.multi
+      ? (menu.checked[i] === true ? ANSI.brightGreen + '☑ ' + ANSI.reset : ANSI.dim + '☐ ' + ANSI.reset)
+      : ''
     out += i === menu.index
-      ? ANSI.brightCyan + '❯ ' + ANSI.bold + item.text + ANSI.reset + '\n'
-      : '  ' + ANSI.dim + item.text + ANSI.reset + '\n'
+      ? ANSI.brightCyan + '❯ ' + ANSI.reset + box + ANSI.bold + item.text + ANSI.reset + '\n'
+      : '  ' + box + ANSI.dim + item.text + ANSI.reset + '\n'
   })
   out += ANSI.dim + menu.footer + ANSI.reset
   return out
@@ -691,8 +698,9 @@ function menuLabel(menu: PendingMenu): string {
 
 /**
  * Ask one of several choices through an arrow-navigable modal menu. The
- * highlighted item's value is returned on an empty Enter; typing a value (or
- * a number, or '0') still works exactly like the previous plain prompt.
+ * highlighted item's value is returned on an empty Enter (multi-select
+ * resolves the checked items' values, '\n'-joined); typing a value (or a
+ * number, or '0') still works exactly like the previous plain prompt.
  */
 function askUserMenu(state: TuiState, menu: PendingMenu): Promise<string> {
   return new Promise((resolve) => {
@@ -854,22 +862,40 @@ async function answerQuestions(state: TuiState, request: AskUserQuestionRequest)
       if (q.detail !== undefined && q.detail !== '') view?.blocks.push({ kind: 'assistant', text: q.detail })
       state.term?.render(renderFrame(state))
     }
+    const options = q.options ?? []
+    // Questions with a fixed option list get the arrow-navigable picker:
+    // single-select keeps the existing highlight+Enter, multi-select toggles
+    // rows with space and submits all checked on Enter.
+    if (options.length > 0) {
+      const multi = q.multiSelect === true
+      const items: MenuItem[] = options.map(opt => ({
+        value: opt.label,
+        text: opt.label + (opt.description === undefined ? '' : ' ' + ANSI.dim + '— ' + opt.description + ANSI.reset),
+      }))
+      const title = ANSI.cyan + '? ' + q.question + ANSI.reset + (q.detail === undefined || q.detail === '' ? '' : ANSI.dim + ' — ' + q.detail + ANSI.reset)
+      const raw = (await askUserMenu(state, {
+        title,
+        items,
+        index: 0,
+        multi,
+        checked: multi ? items.map(() => false) : [],
+        footer: multi ? 'space toggles · Enter submits · Esc cancels' : '↑/↓ highlight · Enter picks · Esc cancels',
+      })).trim()
+      state.prompt = undefined
+      const picked = multi ? raw.split('\n').filter(s => s !== '') : (raw === '' ? [] : [raw])
+      if (multi || picked.length > 0) {
+        answers.push({ id: q.id, selected: picked })
+      } else {
+        answers.push({ id: q.id, selected: [], custom: raw })
+      }
+      continue
+    }
     let text = ANSI.cyan + '? ' + q.question + ANSI.reset + '\n'
     if (q.detail !== undefined) text += ANSI.dim + q.detail + ANSI.reset + '\n'
-    const options = q.options ?? []
-    options.forEach((opt, i) => {
-      text += '  ' + ANSI.bold + String(i + 1) + ')' + ANSI.reset + ' ' + opt.label + (opt.description === undefined ? '' : ' ' + ANSI.dim + '— ' + opt.description + ANSI.reset) + '\n'
-    })
-    const label = text + (q.multiSelect === true ? 'numbers (comma-separated) or custom text' : 'number or custom text') + ': '
+    const label = text + ': '
     const raw = (await askUser(state, label)).trim()
     state.prompt = undefined
-    if (options.length > 0 && /^\d+(,\s*\d+)*$/.test(raw) && raw !== '') {
-      const picked = raw.split(',').map(part => Number(part.trim()) - 1)
-        .filter(index => index >= 0 && index < options.length)
-        .map(index => options[index]?.label)
-        .filter((label): label is string => label !== undefined)
-      answers.push({ id: q.id, selected: picked })
-    } else if (raw === '') {
+    if (raw === '') {
       answers.push({ id: q.id, selected: [] })
     } else {
       answers.push({ id: q.id, selected: [], custom: raw })
@@ -934,6 +960,7 @@ async function pickResume(ctx: Context, state: TuiState, throttle: Throttle): Pr
     title: 'resume a session',
     items,
     index: 0,
+    multi: false, checked: [],
     footer: '0) start fresh · ↑/↓ highlight · Enter picks',
   })).trim()
   state.prompt = undefined
@@ -1004,6 +1031,7 @@ async function pickModel(ctx: Context, state: TuiState, write: (text: string) =>
       title: 'model provider',
       items,
       index: Math.max(0, items.findIndex(i => i.value === current?.provider)),
+      multi: false, checked: [],
       footer: '0) cancel · ↑/↓ highlight · Enter picks',
     })).trim()
     state.prompt = undefined
@@ -1023,6 +1051,7 @@ async function pickModel(ctx: Context, state: TuiState, write: (text: string) =>
     title: 'model — ' + provider,
     items,
     index: Math.max(0, items.findIndex(i => current?.provider === provider && i.value === current.model)),
+    multi: false, checked: [],
     footer: '0) cancel · ↑/↓ highlight · Enter picks',
   })).trim()
   state.prompt = undefined
@@ -1155,6 +1184,7 @@ async function pickPresetMenu(ctx: Context, state: TuiState, write: (text: strin
     title: opts.title,
     items,
     index: Math.max(0, items.findIndex(i => i.value === currentId)),
+    multi: false, checked: [],
     footer: '0) cancel · ↑/↓ highlight · Enter picks',
   })).trim()
   state.prompt = undefined
@@ -1366,6 +1396,7 @@ async function run(ctx: Context, config: Config, io: TuiIo, state: TuiState, thr
       title: 'fork at a past turn' + ANSI.dim + ' (later turns are dropped from the child)' + ANSI.reset,
       items,
       index: 0,
+      multi: false, checked: [],
       footer: '0) cancel · ↑/↓ highlight · Enter picks',
     })).trim()
     state.prompt = undefined
@@ -1519,10 +1550,16 @@ function setupFullScreen(
         state.prompt = undefined
         editor.suggestEnabled = true
         editor.reset()
-        // Empty Enter on a picker menu selects the highlighted row; a typed
-        // answer (number, 'latest', custom text) keeps the legacy behavior.
+        // Empty Enter on a picker menu selects the highlighted row (multi-
+        // select resolves the checked rows, '\n'-joined); a typed answer
+        // (number, 'latest', custom text) keeps the legacy behavior.
         if (p.menu !== undefined && text.trim() === '') {
-          p.resolve(p.menu.items[p.menu.index]?.value ?? '')
+          const menu = p.menu
+          if (menu.multi) {
+            p.resolve(menu.items.filter((_, i) => menu.checked[i] === true).map(i => i.value).join('\n'))
+          } else {
+            p.resolve(menu.items[menu.index]?.value ?? '')
+          }
         } else {
           p.resolve(text)
         }
@@ -1775,6 +1812,16 @@ function setupFullScreen(
     onArrowDown() {
       if (state.search !== undefined) { moveMatch(state, 1, throttle); return true }
       return navigatePromptMenu(state, 1)
+    },
+    // Space in a multi-select modal menu toggles the highlighted row.
+    onMenuToggle() {
+      const prompt = state.prompt
+      if (prompt === undefined || prompt.menu === undefined || !prompt.menu.multi) return false
+      const idx = prompt.menu.index
+      prompt.menu.checked[idx] = !(prompt.menu.checked[idx] === true)
+      prompt.label = menuLabel(prompt.menu)
+      state.term?.render(renderFrame(state))
+      return true
     },
   })
   state.editor = editor

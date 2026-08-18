@@ -632,5 +632,21 @@ function feed(rig: Rig, text: string): void { rig.stdin.emit('data', Buffer.from
   check('row-count change repaints fully', fourth.includes('\x1b[2J') && fourth.includes('\x1b[1;1Honly-5'))
 }
 
+// 27. space key in a modal multi-select menu toggles instead of inserting
+{
+  let toggled = 0
+  const rig = makeEditor()
+  const menuEditor = rig.editor
+  ;(menuEditor as unknown as { callbacks: { onMenuToggle?: () => boolean } }).callbacks.onMenuToggle = () => { toggled += 1; return true }
+  menuEditor.start()
+  feed(rig, ' ')
+  check('menu space consumed, not inserted', toggled === 1 && menuEditor.value === '')
+  const rig2 = makeEditor()
+  ;(rig2.editor as unknown as { callbacks: { onMenuToggle?: () => boolean } }).callbacks.onMenuToggle = () => false
+  rig2.editor.start()
+  feed(rig2, ' ')
+  check('space inserted when toggle declines', rig2.editor.value === ' ')
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed === 0 ? 0 : 1)
