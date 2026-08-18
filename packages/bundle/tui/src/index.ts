@@ -57,7 +57,7 @@ export const Config: z<Config> = z.object({
   resume: z.boolean(),
 })
 
-const REASONING_EFFORTS = ['off', 'high', 'max'] as const
+const REASONING_EFFORTS = ['off', 'low', 'high', 'max'] as const
 
 /** One rendered transcript entry. */
 type Block =
@@ -1071,7 +1071,7 @@ function switchModel(ctx: Context, state: TuiState, write: (text: string) => voi
   if (two === undefined) { provider = current?.provider; model = one }
   else { provider = one; model = two; effort = three === undefined ? current?.reasoningEffort : three }
   if (provider === undefined || model === undefined) { write('dsh: usage /model <provider> <model> [effort]'); return }
-  if (effort !== undefined && !(REASONING_EFFORTS as readonly string[]).includes(effort)) { write('dsh: effort must be one of off | high | max'); return }
+  if (effort !== undefined && !(REASONING_EFFORTS as readonly string[]).includes(effort)) { write('dsh: effort must be one of off | low | high | max'); return }
   const llm = ctx.get('llm')
   const known = (llm?.listConfigurableProviders() ?? []).map(entry => entry.provider)
   const applySwitch = (): void => {
