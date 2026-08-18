@@ -48,3 +48,11 @@ export function formatTokens(n: number): string {
   if (n < 1_000_000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
   return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M'
 }
+
+/**
+ * Status-bar segment for prompt-cache hits: `' · 缓存 45k'`, or '' when the
+ * counter is zero (a first call with no cache reads shows nothing).
+ */
+export function formatCache(n: number): string {
+  return n === 0 ? '' : ' · 缓存 ' + formatTokens(n)
+}

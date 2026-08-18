@@ -34,7 +34,7 @@ import { ANSI, Term, ansiLength, inverseRange, sliceVisible, stripAnsi, truncate
 import { renderInline, renderMarkdown } from './markdown.ts'
 import { diffsFromMeta, renderDiffs, type FileDiff } from './diff.ts'
 import { readClipboardImage, readClipboardText, writeClipboardText } from './clipboard.ts'
-import { addUsage, billedInput, emptyUsage, formatTokens, type TokenUsageLike, type UsageTotals } from './usage.ts'
+import { addUsage, billedInput, emptyUsage, formatCache, formatTokens, type TokenUsageLike, type UsageTotals } from './usage.ts'
 import { scanFiles } from './files.ts'
 import { LineEditor, type SuggestItem } from './editor.ts'
 
@@ -330,18 +330,20 @@ function buildStatus(state: TuiState, width: number): string {
     const elapsed = view.turnStartedAt === undefined ? '' : ' ' + String(Math.floor((Date.now() - view.turnStartedAt) / 1000)) + 's'
     const inTok = billedInput(view.turnUsage)
     const tokens = inTok + view.turnUsage.output === 0 ? '' : ' ↑' + formatTokens(inTok) + ' ↓' + formatTokens(view.turnUsage.output)
+    const cache = formatCache(view.turnUsage.cacheRead)
     const queued = view.pending.length === 0 ? '' : ' · +' + String(view.pending.length) + ' queued'
-    activity = ANSI.brightYellow + ' ' + spin + elapsed + tokens + queued + ANSI.reset
+    activity = ANSI.brightYellow + ' ' + spin + elapsed + tokens + cache + queued + ANSI.reset
   } else {
     const inTok = view === undefined ? 0 : billedInput(view.usage)
     const totals = view === undefined || (inTok === 0 && view.usage.output === 0) ? '' : ' · ↑' + formatTokens(inTok) + ' ↓' + formatTokens(view.usage.output)
+    const cache = view === undefined ? '' : formatCache(view.usage.cacheRead)
     const window = state.contextWindow
     const total = view === undefined ? 0 : billedInput(view.usage)
     // Cumulative billed input over the window (a long conversation must grow
     // past a single step's share); lastInputTokens stayed at ~1% forever.
     const ctxPct = window === undefined || window <= 0 || total <= 0 ? '' : ' · ' + String(Math.min(999, Math.round((total / window) * 100))) + '% ctx'
     activity = ANSI.dim + ' ○ idle' + ANSI.reset
-    stats = totals + ctxPct
+    stats = totals + cache + ctxPct
   }
   const auto = state.current !== undefined && state.autoApprove.has(state.current) ? ' · ' + ANSI.brightGreen + 'auto' + ANSI.reset : ''
   const todos = view === undefined || view.todos.length === 0 ? '' : ' · ' + ANSI.brightMagenta + '☑ ' + String(view.todos.filter(t => t.status === 'completed').length) + '/' + String(view.todos.length) + ANSI.reset

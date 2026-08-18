@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events'
 import { LineEditor } from '../packages/bundle/tui/src/editor.ts'
 import { renderMarkdown } from '../packages/bundle/tui/src/markdown.ts'
 import { Term, inverseRange, sliceVisible, wrappedCursor } from '../packages/bundle/tui/src/term.ts'
-import { addUsage, billedInput, emptyUsage, formatTokens } from '../packages/bundle/tui/src/usage.ts'
+import { addUsage, billedInput, emptyUsage, formatCache, formatTokens } from '../packages/bundle/tui/src/usage.ts'
 import { readClipboardText, writeClipboardText } from '../packages/bundle/tui/src/clipboard.ts'
 
 let passed = 0
@@ -591,6 +591,14 @@ function feed(rig: Rig, text: string): void { rig.stdin.emit('data', Buffer.from
   check('sliceVisible strips ANSI', sliceVisible('\x1b[31mab\x1b[0mcd', 0, 4) === 'abcd')
   check('sliceVisible wide CJK', sliceVisible('a你b', 1, 3) === '你')
   check('sliceVisible end clamp', sliceVisible('abc', 0, 99) === 'abc')
+}
+
+// 25. cache-hit status segment
+{
+  check('formatCache zero hides', formatCache(0) === '')
+  check('formatCache small', formatCache(45000) === ' · 缓存 45k')
+  check('formatCache exact thousand', formatCache(1200) === ' · 缓存 1.2k')
+  check('formatCache millions', formatCache(1_500_000) === ' · 缓存 1.5M')
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)
