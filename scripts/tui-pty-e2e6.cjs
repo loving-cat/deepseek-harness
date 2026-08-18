@@ -13,7 +13,7 @@ const count = (re) => (buf.match(new RegExp(re.source, re.flags.includes('g') ? 
 const steps = [
   { name: 'boot', need: () => count(/\/help for commands/) >= 1 },
   { name: 'tool task', send: 'Use the pwsh tool to run exactly: echo DSH_TOOL_OK — then reply with the word done.\r', delay: 2500 },
-  { name: 'tool call rendered', need: () => count(/● (?:pwsh|bash|shell)/) >= 1 },
+  { name: 'tool call rendered', need: () => count(/╭/) >= 1 },
   { name: 'turn done', need: () => count(/○ idle/) >= 1 },
   { name: 'Ctrl+O expand', send: '\x0f', delay: 300 },
   // Each feature independently (a diff frame does not repeat unchanged rows,

@@ -356,6 +356,39 @@ function closeSearch(state: TuiState): void {
   state.editor?.reset()
 }
 
+/** Parse the command out of a shell tool's JSON args (best effort). */
+function shellCommand(args: string): string {
+  try {
+    const parsed = JSON.parse(args) as { command?: unknown; cwd?: unknown }
+    if (typeof parsed.command === 'string') {
+      const cwd = typeof parsed.cwd === 'string' ? ' (in ' + parsed.cwd + ')' : ''
+      return parsed.command + cwd
+    }
+  } catch { /* not JSON */ }
+  return args.replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * Render a shell tool block as a bordered panel: command line, then the
+ * output (dim, collapsed unless expanded), then a status row.
+ */
+function renderShellPanel(block: ToolBlock, width: number, expandTools: boolean): string[] {
+  const inner = Math.max(1, width - 2)
+  const cmd = shellCommand(block.args)
+  const bar = '─'.repeat(Math.max(0, inner))
+  const out: string[] = [ANSI.cyan + '╭' + ANSI.reset + ' ' + ANSI.bold + block.name + ANSI.reset + ANSI.dim + ' ' + bar + ANSI.reset]
+  out.push(ANSI.cyan + '│' + ANSI.reset + ' ' + ANSI.green + '$ ' + ANSI.reset + truncateAnsi(cmd, inner - 2))
+  const summary = block.summary
+  if (summary !== undefined && summary !== '') {
+    const cap = expandTools ? 60 : 8
+    out.push(...wrapAnsi(ANSI.dim + '│ ' + summary + ANSI.reset, inner + 1).slice(0, cap))
+  } else {
+    out.push(ANSI.dim + '│ (no output)' + ANSI.reset)
+  }
+  out.push(ANSI.cyan + '╰' + ANSI.reset + ANSI.dim + bar + ANSI.reset)
+  return out
+}
+
 /**
  * Render one block to wrapped, styled lines, memoized by block identity for
  * the given render params. `streaming` (the open assistant block whose text
@@ -402,6 +435,10 @@ function renderBlock(block: Block, width: number, expandTools: boolean, showReas
       return out
     }
     case 'tool': {
+      // Shell tools render as a panel (command + output), pi-style.
+      if (block.name === 'bash' || block.name === 'pwsh' || block.name === 'shell') {
+        return renderShellPanel(block, width, expandTools)
+      }
       const preview = truncateAnsi(block.args.replace(/\s+/g, ' ').trim(), Math.max(10, width - 4))
       const out = [ANSI.cyan + '● ' + block.name + ANSI.reset + ' ' + ANSI.dim + preview + ANSI.reset]
       if (expandTools && block.args.trim() !== '') {
