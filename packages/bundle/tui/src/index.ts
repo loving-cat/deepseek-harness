@@ -724,6 +724,26 @@ function copySelection(state: TuiState, notify: (text: string) => void): void {
   })
 }
 
+/**
+ * Extract a markdown code block from the rendered body rows when the clicked
+ * row is its top bar (`┌ …⧉`). Rows are the plain-text body window; the bar
+ * opens the block and the `└` row closes it; code rows drop their `│` border.
+ */
+function extractCodeAt(state: TuiState, bodyRow: number): string | undefined {
+  const body = state.bodyText
+  if (body === undefined) return undefined
+  const topLine = body[bodyRow]
+  if (topLine === undefined || !topLine.trimStart().startsWith('┌')) return undefined
+  const parts: string[] = []
+  for (let r = bodyRow + 1; r < body.length; r += 1) {
+    const line = body[r] ?? ''
+    if (line.trimStart().startsWith('└')) break
+    if (line.startsWith('│')) parts.push(line.slice(1))
+    else parts.push(line)
+  }
+  return parts.join('\n')
+}
+
 /** Block indexes whose stripped text contains the query (case-insensitive), oldest first. */
 function computeMatches(view: SessionView | undefined, query: string): number[] {
   const q = query.toLowerCase()
@@ -1933,10 +1953,19 @@ function setupFullScreen(
         editor.applySuggestAt(row - rows.start)
         return
       }
-      // Body zone (0-based screen row 2..2+bodyRows): start a selection box;
-      // anywhere else (status/input) dismisses it. Columns are 1-based SGR.
+      // Body zone (0-based screen row 2..2+bodyRows): a click on a code
+      // block's top bar copies the block; otherwise it starts a selection.
+      // Columns are 1-based SGR.
       const bodyRows = state.bodyRows ?? 0
       if (row - 1 >= 2 && row - 1 < 2 + bodyRows) {
+        const code = extractCodeAt(state, row - 3)
+        if (code !== undefined && code.trim() !== '') {
+          state.selection = undefined
+          void writeClipboardText(code).then((ok) => {
+            addSystem(state, ok ? 'copied code block (' + String(code.length) + ' chars)' : 'clipboard write failed', throttle)
+          })
+          return
+        }
         state.selection = { anchor: { row: row - 1, col: col - 1 }, focus: { row: row - 1, col: col - 1 } }
       } else {
         state.selection = undefined

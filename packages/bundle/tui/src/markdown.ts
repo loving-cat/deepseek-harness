@@ -282,9 +282,12 @@ export function makeHighlighter(lang: string): (line: string) => string {
 /** Render one code-block body: dim border, language-aware highlight, no re-flow. */
 function renderCodeBlock(body: string[], width: number, lang: string): string[] {
   const inner = Math.max(1, width - 2)
-  const bar = '─'.repeat(Math.max(0, inner))
+  const langPart = lang === '' ? '' : ' ' + lang + ' '
+  // The ⧉ on the top bar marks a click-to-copy code block (the caller
+  // extracts the block from the rendered rows when the bar is clicked).
+  const bar = '─'.repeat(Math.max(0, inner - ansiLength(langPart) - 1))
   const highlight = makeHighlighter(lang)
-  const out: string[] = [ANSI.dim + '┌' + (lang === '' ? '' : ' ' + lang + ' ') + bar + ANSI.reset]
+  const out: string[] = [ANSI.dim + '┌' + langPart + bar + '⧉' + ANSI.reset]
   for (const line of body) {
     const clipped = line.length > inner ? line.slice(0, inner) : line
     out.push(ANSI.dim + '│' + ANSI.reset + highlight(clipped))
