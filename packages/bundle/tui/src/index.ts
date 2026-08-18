@@ -270,6 +270,7 @@ function addView(state: TuiState, agent: Agent, handle: { dispose(): Promise<voi
   }
   const key = String(agent.session.id)
   state.views.set(key, view)
+  closeSearch(state) // a new current view invalidates any open search's match indexes
   state.current = key
   return view
 }
@@ -324,6 +325,20 @@ function toolResultText(message: unknown): string {
     }
   }
   return parts.join('\n')
+}
+
+/**
+ * Close an open transcript search. A session switch invalidates the search's
+ * match indexes (they are block indexes of the OLD view), so every switch
+ * point calls this; the query is remembered for the next Ctrl+F.
+ */
+function closeSearch(state: TuiState): void {
+  if (state.search !== undefined) {
+    state.searchMemory = state.search.query
+    state.search = undefined
+  }
+  if (state.editor !== undefined) state.editor.suggestEnabled = true
+  state.editor?.reset()
 }
 
 /**
@@ -1390,6 +1405,7 @@ async function showSessionTree(state: TuiState, write: (text: string) => void): 
   })).trim()
   state.prompt = undefined
   if (picked === '' || !byId.has(picked) || picked === state.current) return
+  closeSearch(state)
   state.current = picked
   updateTitle(state)
   write('switched → ' + picked)
@@ -1641,6 +1657,7 @@ async function run(ctx: Context, config: Config, io: TuiIo, state: TuiState, thr
     if (entry === undefined) return
     if (entry.kind === 'live') {
       if (entry.id !== state.current) {
+        closeSearch(state)
         state.current = entry.id
         updateTitle(state)
         addSystem(state, 'switched → ' + entry.id, throttle)
@@ -2097,6 +2114,12 @@ export function apply(ctx: Context, config: Config): void {
             break
         }
         state.subagents.set(key, sv)
+        // Cap the panel so a long-running multi-agent session cannot grow it
+        // without bound (oldest child drops first).
+        if (state.subagents.size > 100) {
+          const oldest = state.subagents.keys().next().value
+          if (oldest !== undefined) state.subagents.delete(oldest)
+        }
         // Repaint only when the current view is the parent (or we are viewing
         // a session whose children these are).
         if (isCurrent || (state.current !== undefined && parentId === state.current)) {
@@ -2245,6 +2268,7 @@ export function apply(ctx: Context, config: Config): void {
     // (sub-agents) are still labelled inside answerApproval.
     const ownerKey = String(req.agent.session.id)
     if (state.views.has(ownerKey) && state.current !== ownerKey) {
+      closeSearch(state)
       state.current = ownerKey
       // Match the spinner/progress state to the view now on screen.
       if (state.views.get(ownerKey)?.busy === true) startSpinner(state, throttle)
