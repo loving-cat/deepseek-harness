@@ -62,9 +62,23 @@ const REASONING_EFFORTS = ['off', 'low', 'high', 'max'] as const
 /** One rendered transcript entry. */
 type Block =
   | { kind: 'user'; text: string }
-  | { kind: 'assistant'; text: string; reasoning?: string }
+  | { kind: 'assistant'; text: string; reasoning?: string; images?: ImageMeta[] }
   | { kind: 'tool'; name: string; args: string; callId: string; diffs?: FileDiff[]; summary?: string }
   | { kind: 'system'; text: string }
+
+/** One image attached to an assistant message (bytes loaded lazily for inline display). */
+interface ImageMeta {
+  attachmentId: string
+  mediaType: string
+  width: number
+  height: number
+  name?: string
+  /** Base64 payload, filled asynchronously after the block is created. */
+  data?: string
+}
+
+/** Kitty graphics is supported by kitty and WezTerm (Windows Terminal does not expose it). */
+const KITTY_GRAPHICS = process.env.KITTY_WINDOW_ID !== undefined || process.env.WEZTERM_PANE !== undefined
 
 /** One selectable row of a modal picker menu. */
 interface MenuItem {
@@ -390,6 +404,21 @@ function renderShellPanel(block: ToolBlock, width: number, expandTools: boolean)
 }
 
 /**
+ * Kitty graphics transmit+display APC sequence (base64, chunked). The image
+ * is drawn at the cursor and occupies ceil(height/16) terminal rows.
+ */
+function kittyTransmit(base64: string, width: number, height: number): string {
+  const chunk = 4096
+  let out = ''
+  for (let i = 0; i < base64.length; i += chunk) {
+    const part = base64.slice(i, i + chunk)
+    const last = i + chunk >= base64.length
+    out += '\x1b_Ga=T,f=100,s=' + String(width) + ',v=' + String(height) + ',m=' + (last ? '0' : '1') + ';' + part + '\x1b\\'
+  }
+  return out
+}
+
+/**
  * Render one block to wrapped, styled lines, memoized by block identity for
  * the given render params. `streaming` (the open assistant block whose text
  * grows every chunk) and search mode bypass the cache — the former because
@@ -432,6 +461,17 @@ function renderBlock(block: Block, width: number, expandTools: boolean, showReas
         out.push('')
       }
       out.push(...renderMarkdown(block.text, width))
+      // Inline images: a kitty-graphics transmit+display when the terminal
+      // supports it, always a placeholder row. The image occupies ceil(h/16)
+      // rows, so reserve the rows so following content does not overlap.
+      for (const img of block.images ?? []) {
+        if (KITTY_GRAPHICS && img.data !== undefined) {
+          out.push(kittyTransmit(img.data, img.width, img.height))
+        }
+        out.push(ANSI.dim + '🖼 ' + (img.name ?? 'image') + ' (' + String(img.width) + 'x' + String(img.height) + ')' + ANSI.reset)
+        const rows = Math.max(1, Math.ceil(img.height / 16))
+        for (let i = 1; i < rows; i += 1) out.push('')
+      }
       return out
     }
     case 'tool': {
@@ -514,7 +554,10 @@ function renderFrame(state: TuiState): { lines: string[]; cursorRow: number; cur
     // Long-transcript virtualization: settled blocks render once and reuse
     // their wrapped lines; the open streaming block and search mode render
     // fresh (the former changes every chunk, the latter needs mutable rows).
-    const streaming = view !== undefined && view.openAssistant === block
+    // Image blocks carry async-loaded bytes (and a per-frame kitty transmit),
+    // so they render fresh like the streaming block.
+    const streaming = (view !== undefined && view.openAssistant === block)
+      || ('images' in block && ((block as { images?: ImageMeta[] }).images ?? []).length > 0)
     const rendered = search !== undefined
       ? renderBlock(block, width, state.expandTools, state.showReasoning)
       : cachedRender(state, block, width, state.expandTools, state.showReasoning, streaming)
@@ -948,8 +991,47 @@ function messageText(content: unknown): string {
   return parts.join('\n')
 }
 
+/** Extract image blocks from a message's content (attachment refs). */
+function extractImages(content: unknown): ImageMeta[] {
+  if (!Array.isArray(content)) return []
+  const out: ImageMeta[] = []
+  for (const b of content) {
+    if (b === null || typeof b !== 'object' || (b as { type?: unknown }).type !== 'image') continue
+    const a = (b as { attachment?: unknown }).attachment as {
+      attachmentId?: unknown
+      mediaType?: unknown
+      bytes?: unknown
+      width?: unknown
+      height?: unknown
+      name?: unknown
+    } | undefined
+    if (a === undefined || typeof a.attachmentId !== 'string' || typeof a.width !== 'number') continue
+    out.push({
+      attachmentId: a.attachmentId,
+      mediaType: typeof a.mediaType === 'string' ? a.mediaType : 'image/png',
+      width: a.width,
+      height: typeof a.height === 'number' ? a.height : 0,
+      ...(typeof a.name === 'string' ? { name: a.name } : {}),
+    })
+  }
+  return out
+}
+
+/** Read an attachment's bytes into the block's image meta (best effort). */
+async function loadImageBytes(ctx: Context, block: { images?: ImageMeta[] }): Promise<void> {
+  const attachments = ctx.get('attachments') as { readImage(ref: { attachmentId: string }, signal?: AbortSignal): Promise<{ data: Uint8Array }> } | undefined
+  if (attachments === undefined) return
+  for (const img of block.images ?? []) {
+    if (img.data !== undefined) continue
+    try {
+      const stored = await attachments.readImage({ attachmentId: img.attachmentId })
+      img.data = Buffer.from(stored.data).toString('base64')
+    } catch { /* missing or unreadable image: keep the placeholder */ }
+  }
+}
+
 /** Rebuild a view's transcript from its session's existing events (resume/fork replay). */
-function replayHistory(view: SessionView): void {
+function replayHistory(ctx: Context, view: SessionView): void {
   view.blocks = []
   view.todos = []
   view.openAssistant = undefined
@@ -960,7 +1042,12 @@ function replayHistory(view: SessionView): void {
         break
       case 'assistant/message': {
         const text = messageText(event.data.message.content)
-        if (text !== '') view.blocks.push({ kind: 'assistant', text })
+        const images = extractImages(event.data.message.content)
+        if (text !== '' || images.length > 0) {
+          const block: Block = { kind: 'assistant', text, ...(images.length > 0 ? { images } : {}) }
+          view.blocks.push(block)
+          if (images.length > 0) void loadImageBytes(ctx, block)
+        }
         const usage = event.data.usage
         if (usage !== undefined) {
           addUsage(view.usage, usage)
@@ -1642,7 +1729,7 @@ async function run(ctx: Context, config: Config, io: TuiIo, state: TuiState, thr
   }
   const view = addView(state, handle.agent, handle)
   await view.agent.whenIdle()
-  replayHistory(view)
+  replayHistory(ctx, view)
 
   /** Fork the current session into a live child; [turn] rewinds the seed to that turn's end. */
   const fork = async (turn?: number): Promise<void> => {
@@ -1671,7 +1758,7 @@ async function run(ctx: Context, config: Config, io: TuiIo, state: TuiState, thr
       const child = await agents.create({ sessionId: SessionId('session-' + randomUUID()), meta: forkMeta, seed, agentOptions, setup })
       const childView = addView(state, child.agent, child)
       await child.agent.whenIdle()
-      replayHistory(childView)
+      replayHistory(ctx, childView)
       updateTitle(state)
       const where = turn === undefined ? 'latest point' : 'turn ' + String(turn)
       addSystem(state, 'forked @ ' + where + ' → ' + String(child.agent.id) + ANSI.dim + ' (parent kept alive — /sessions to switch)' + ANSI.reset, throttle)
@@ -1785,7 +1872,7 @@ async function run(ctx: Context, config: Config, io: TuiIo, state: TuiState, thr
       const resumed = await agents.resume({ resumeSessionId: SessionId(entry.id), agentOptions, setup })
       const resumedView = addView(state, resumed.agent, resumed)
       await resumed.agent.whenIdle()
-      replayHistory(resumedView)
+      replayHistory(ctx, resumedView)
       updateTitle(state)
       addSystem(state, 'resumed → ' + entry.id, throttle)
     } catch (error: unknown) {
@@ -1799,7 +1886,7 @@ async function run(ctx: Context, config: Config, io: TuiIo, state: TuiState, thr
       const created = await agents.create({ sessionId: SessionId('session-' + randomUUID()), meta, agentOptions, setup })
       const freshView = addView(state, created.agent, created)
       await created.agent.whenIdle()
-      replayHistory(freshView)
+      replayHistory(ctx, freshView)
       updateTitle(state)
       addSystem(state, 'new session → ' + String(created.agent.id), throttle)
     } catch (error: unknown) {
@@ -2323,6 +2410,12 @@ export function apply(ctx: Context, config: Config): void {
         break
       }
       case 'assistant/message': {
+        const images = extractImages(event.data.message.content)
+        if (images.length > 0) {
+          const b = ensureAssistant(view)
+          b.images = (b.images ?? []).concat(images)
+          void loadImageBytes(ctx, b)
+        }
         const usage = event.data.usage
         if (usage !== undefined) {
           addUsage(view.usage, usage)

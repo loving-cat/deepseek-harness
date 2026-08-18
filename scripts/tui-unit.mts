@@ -3,7 +3,7 @@
 import { EventEmitter } from 'node:events'
 import { LineEditor } from '../packages/bundle/tui/src/editor.ts'
 import { renderMarkdown } from '../packages/bundle/tui/src/markdown.ts'
-import { Term, inverseRange, sliceVisible, wrappedCursor } from '../packages/bundle/tui/src/term.ts'
+import { Term, ansiLength, inverseRange, sliceVisible, stripAnsi, wrappedCursor } from '../packages/bundle/tui/src/term.ts'
 import { addUsage, billedInput, emptyUsage, formatCache, formatTokens } from '../packages/bundle/tui/src/usage.ts'
 import { readClipboardText, writeClipboardText } from '../packages/bundle/tui/src/clipboard.ts'
 
@@ -674,6 +674,14 @@ function feed(rig: Rig, text: string): void { rig.stdin.emit('data', Buffer.from
   rig2.editor.start()
   feed(rig2, ' ')
   check('space inserted when toggle declines', rig2.editor.value === ' ')
+}
+
+// 28. kitty-graphics APC sequences have zero visible width and strip cleanly
+{
+  const apc = '\u001b_Ga=T,f=100,s=10,v=10,m=0;AAAA\u001b\\'
+  check('APC visible width is 0', ansiLength(apc) === 0)
+  check('APC strips to empty', stripAnsi(apc) === '')
+  check('ansiLength skips APC mid-text', ansiLength('x' + apc + 'y') === 2)
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

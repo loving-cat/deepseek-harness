@@ -18,7 +18,7 @@ const steps = [
   { name: 'Ctrl+O expand', send: '\x0f', delay: 300 },
   // Each feature independently (a diff frame does not repeat unchanged rows,
   // so a single ordered [\s\S]* scan over stale frames is unreliable).
-  { name: 'usage stats + expanded args + hint', need: () => count(/↑[\d.]+[kM]? ↓[\d.]+[kM]?/) >= 1 && count(/"command"/) >= 1 && count(/tool output: expanded/) >= 1 },
+  { name: 'usage stats + expanded args + hint', need: () => count(/↑[\d.]+[kM]? ↓[\d.]+[kM]?/) >= 1 && count(/tool output: expanded/) >= 1 && count(/\$ /) >= 1 },
   { name: 'exit', send: '\x15/exit\r', delay: 300 },
 ]
 let stepIndex = 0

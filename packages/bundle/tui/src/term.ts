@@ -51,9 +51,9 @@ export function charWidth(ch: string): number {
   return WIDE_RE.test(ch) ? 2 : 1
 }
 
-/** Strip ANSI escape sequences, returning only the printable payload. */
+/** Strip ANSI escape sequences (CSI, OSC, APC), returning only the printable payload. */
 export function stripAnsi(text: string): string {
-  return text.replace(/\x1b\][^\x07]*\x07|\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+  return text.replace(/\x1b\][^\x07]*\x07|\x1b_[^\x1b]*\x1b\\|\x1b\[[0-?]*[ -/]*[@-~]/g, '')
 }
 
 /** Visible column width of a string that may contain ANSI escapes. */
@@ -62,10 +62,13 @@ export function ansiLength(text: string): number {
   let i = 0
   while (i < text.length) {
     if (text.charCodeAt(i) === 0x1b) {
-      // Skip one complete escape sequence (CSI … final byte, or OSC … BEL).
+      // Skip one complete escape sequence (APC … ST, CSI … final, or OSC … BEL).
       if (text[i + 1] === ']') {
         const bel = text.indexOf('\x07', i + 2)
         i = bel === -1 ? text.length : bel + 1
+      } else if (text[i + 1] === '_') {
+        const st = text.indexOf('\x1b\\', i + 2)
+        i = st === -1 ? text.length : st + 2
       } else {
         i += 2
         while (i < text.length && text.charCodeAt(i) < 0x40) i += 1
@@ -94,11 +97,14 @@ export function wrapAnsi(text: string, width: number): string[] {
     while (i < raw.length) {
       const code = raw.charCodeAt(i)
       if (code === 0x1b) {
-        // Copy the whole escape sequence atomically.
+        // Copy the whole escape sequence atomically (APC … ST included).
         let j = i
         if (raw[i + 1] === ']') {
           const bel = raw.indexOf('\x07', i + 2)
           j = bel === -1 ? raw.length - 1 : bel
+        } else if (raw[i + 1] === '_') {
+          const st = raw.indexOf('\x1b\\', i + 2)
+          j = st === -1 ? raw.length - 1 : st + 1
         } else {
           j = i + 2
           while (j < raw.length && raw.charCodeAt(j) < 0x40) j += 1
@@ -170,6 +176,9 @@ export function truncateAnsi(text: string, width: number): string {
       if (text[i + 1] === ']') {
         const bel = text.indexOf('\x07', i + 2)
         j = bel === -1 ? text.length - 1 : bel
+      } else if (text[i + 1] === '_') {
+        const st = text.indexOf('\x1b\\', i + 2)
+        j = st === -1 ? text.length - 1 : st + 1
       } else {
         j = i + 2
         while (j < text.length && text.charCodeAt(j) < 0x40) j += 1
