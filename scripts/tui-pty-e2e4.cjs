@@ -10,15 +10,15 @@ let buf = ''
 let mark = 0
 const started = Date.now()
 const steps = [
-  { name: 'boot', wait: /dsh tui[\s\S]*\/help for commands/, send: '/model' },
-  { name: 'dropdown shows /model highlighted', wait: /❯\s*(?:\x1b\[[0-9;]*m)*\/model/, send: '\t' },
-  { name: 'tab filled /model + space', wait: /dsh > (?:\x1b\[[0-9;]*m)*\/model /, send: '\r' },
-  { name: 'enter runs /model → picker opens', wait: /model provider/, send: '\x1b' },
-  { name: 'esc closes the modal menu', wait: /dsh > /, send: '/F' },
-  { name: 'uppercase /F → /fork first', wait: /❯\s*(?:\x1b\[[0-9;]*m)*\/fork/, send: '\x1b' },
+  { name: 'boot', wait: /dsh tui[\s\S]*\/help for commands/, send: '/model', delay: 2500 },
+  { name: 'dropdown shows /model highlighted', wait: /❯\s*(?:\x1b\[[0-9;]*m)*\/model/, send: '\t', delay: 300 },
+  { name: 'tab filled /model + space', wait: /dsh > (?:\x1b\[[0-9;]*m)*\/model /, send: '\r', delay: 300 },
+  { name: 'enter runs /model → picker opens', wait: /model provider/, send: '\x1b', delay: 300 },
+  { name: 'esc closes the modal menu', wait: /dsh > /, send: '/F', delay: 800 },
+  { name: 'uppercase /F → /fork first', wait: /❯\s*(?:\x1b\[[0-9;]*m)*\/fork/, send: '\x1b', delay: 300 },
   { name: 'esc closes dropdown', wait: null, send: null, custom: 'esc' },
   { name: 'dropdown closed', wait: null, send: '\x15', custom: 'escGone' },
-  { name: 'cleared, exit', wait: null, send: '/exit\r' },
+  { name: 'cleared, exit', wait: null, send: '/exit\r', delay: 300 },
 ]
 let stepIndex = 0
 const killer = setTimeout(() => {
@@ -50,7 +50,10 @@ async function advance() {
       console.log(`[PTY4] step ok: ${step.name} (${((Date.now() - started) / 1000).toFixed(1)}s)`)
       mark = buf.length
       stepIndex++
-      if (step.send !== null) child.write(step.send)
+      if (step.send !== null) {
+        if (step.delay !== undefined) await new Promise(r => setTimeout(r, step.delay))
+        child.write(step.send)
+      }
     }
   } finally {
     advancing = false
