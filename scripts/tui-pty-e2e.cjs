@@ -20,7 +20,7 @@ const steps = [
   // type 'ab', shift+enter (kitty seq), 'cd' → input area must show two rows
   { name: 'shift+enter makes two input rows', wait: null, send: 'ab\x1b[13;2ucd' },
   { name: 'input rows rendered', wait: new RegExp('dsh > ' + ANSI_M + 'ab[\\s\\S]*?cd'), send: '\x15' }, // Ctrl+U clear
-  { name: 'task submitted', wait: null, send: 'Reply with exactly the single token TUI_OK and nothing else.\r' },
+  { name: 'task submitted', wait: null, send: 'Reply with exactly the single token TUI_OK and nothing else. Do not call any tools; answer directly.\r' },
   { name: 'turn started', wait: /[⠋⠙⠹⠸⠼⠴⦾⦿]/, send: null },
   { name: 'turn finished', wait: /○ idle/, send: '/help\r' },
   { name: 'help lists fork turn syntax', wait: /\/fork \[turn\]/, send: '/fork\r' },
@@ -47,10 +47,33 @@ function advance() {
     stepIndex++
     if (step.send !== null) child.write(step.send)
   }
+  stepsDone = true
 }
 
+// Auto-answer tool-approval prompts and user questions: the model sometimes
+// calls tools even for a trivial reply task, and an unanswered modal stalls.
+let approveMark = 0
+let qMark = 0
+let stepsDone = false
 child.onData((data) => {
   buf += data
+  if (!stepsDone) {
+    // A fresh 'approve …' prompt → allow once (also advances qMark so the
+    // trailing '?' of the approval text cannot trigger the question path).
+    const atail = buf.slice(approveMark)
+    if (/approve /.test(atail)) {
+      approveMark = buf.length
+      qMark = buf.length
+      setTimeout(() => { try { child.write('y\r') } catch {} }, 300)
+    } else {
+      // A fresh '? ' modal (ask_user_question) → pick the first option.
+      const qtail = buf.slice(qMark)
+      if (/\? /.test(qtail)) {
+        qMark = buf.length
+        setTimeout(() => { try { child.write('1\r') } catch {} }, 300)
+      }
+    }
+  }
   advance()
 })
 const onExitDone = ({ exitCode }) => {
