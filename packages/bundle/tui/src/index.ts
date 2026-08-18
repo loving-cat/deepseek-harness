@@ -234,6 +234,7 @@ const SLASH_COMMANDS: readonly SuggestItem[] = [
   { value: 'new', description: 'start a fresh session alongside this one' },
   { value: 'copy', description: 'copy the last reply to the clipboard (Ctrl+X)' },
   { value: 'name', description: 'name the current session — /name <title> (shown in /sessions)' },
+  { value: 'tree', description: 'show the session family tree (fork lineage) and switch' },
   { value: 'auto', description: 'toggle auto-approve for this session' },
   { value: 'bell', description: 'toggle the turn-end bell' },
   { value: 'sessions', description: 'switch between live sessions or resume a persisted one' },
@@ -1064,6 +1065,7 @@ const HELP_TEXT = [
   '  /new                           start a fresh session alongside this one',
   '  /bell                          toggle the turn-end bell',
   '  /name <title>                  name the current session (shown in /sessions)',
+  '  /tree                          show the session family tree (fork lineage); Enter switches',
   '  Ctrl+T                          toggle the thinking (reasoning) display',
   '  Ctrl+P                          cycle to the next model (provider catalog)',
   '  Ctrl+L                          open the model picker menu',
@@ -1303,7 +1305,62 @@ async function handleCommand(ctx: Context, state: TuiState, write: (text: string
   }
   if (text === '/copy') { copyLastReply(state, write); return true }
   if (text.startsWith('/name ')) { nameSession(state, write, text.slice('/name '.length)); return true }
+  if (text === '/tree') { await showSessionTree(state, write); return true }
   return false
+}
+
+/**
+ * /tree: the live session family tree (fork lineage via parentSession). Rows
+ * are indented by depth; Enter switches to the highlighted session.
+ */
+async function showSessionTree(state: TuiState, write: (text: string) => void): Promise<void> {
+  interface Node { id: string; depth: number; label: string }
+  const byId = new Map<string, { parent: string | undefined; label: string }>()
+  for (const [id, v] of state.views) {
+    const header = v.agent.session.header
+    const firstUser = v.blocks.find(b => b.kind === 'user')
+    const first = firstUser === undefined ? '' : (firstUser.text.split('\n')[0] ?? '')
+    const title = state.titles.get(id) ?? first
+    byId.set(id, {
+      parent: header.parentSession === undefined ? undefined : String(header.parentSession),
+      label: (state.titles.has(id) ? ANSI.brightGreen + '✦ ' + ANSI.reset : '')
+        + truncateAnsi(title === '' ? '(no user message yet)' : title, 40)
+        + ' ' + ANSI.dim + '#' + id.slice(-6) + ANSI.reset
+        + (id === state.current ? ' ' + ANSI.dim + '(current)' + ANSI.reset : '')
+        + (v.busy ? ' ' + ANSI.brightYellow + 'working' + ANSI.reset : ''),
+    })
+  }
+  if (byId.size === 0) { write('no sessions yet'); return }
+  const roots = [...byId.keys()].filter((id) => {
+    const parent = byId.get(id)?.parent
+    return parent === undefined || !byId.has(parent)
+  }).sort()
+  const nodes: Node[] = []
+  const walk = (id: string, depth: number): void => {
+    const n = byId.get(id)
+    if (n === undefined) return
+    nodes.push({ id, depth, label: n.label })
+    const children = [...byId.keys()].filter(c => byId.get(c)?.parent === id).sort()
+    for (const c of children) walk(c, depth + 1)
+  }
+  for (const r of roots) walk(r, 0)
+  const items: MenuItem[] = nodes.map(n => ({
+    value: n.id,
+    text: (n.depth === 0 ? '' : ANSI.dim + '└─ '.repeat(n.depth) + ANSI.reset) + n.label,
+  }))
+  const currentIdx = nodes.findIndex(n => n.id === state.current)
+  const picked = (await askUserMenu(state, {
+    title: 'session tree' + ANSI.dim + ' (fork lineage — Enter switches)' + ANSI.reset,
+    items,
+    index: currentIdx === -1 ? 0 : currentIdx,
+    multi: false, checked: [],
+    footer: '↑/↓ highlight · Enter switches · Esc cancels',
+  })).trim()
+  state.prompt = undefined
+  if (picked === '' || !byId.has(picked) || picked === state.current) return
+  state.current = picked
+  updateTitle(state)
+  write('switched → ' + picked)
 }
 
 /** One completed turn of a session: turn number plus its first user message. */
