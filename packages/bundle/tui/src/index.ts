@@ -176,6 +176,13 @@ interface TuiState {
   /** Epoch ms of the last idle Ctrl+C (double-press quits; single clears input). */
   idleInterruptAt: number | undefined
   /**
+   * Render memoization for long-transcript virtualization: block identity →
+   * its wrapped lines for given width/expand/reasoning params. Streaming
+   * (open) assistant blocks and search mode bypass it; tool/result mutations
+   * and expand/reasoning toggles invalidate the affected/all entries.
+   */
+  renderCache: Map<Block, { width: number; expand: boolean; reasoning: boolean; lines: string[] }>
+  /**
    * App-internal mouse text selection: 0-based screen anchor/focus rows and
    * cols (row 0 = status bar, body starts at row 2). Left-drag sets it, the
    * renderer highlights the box, right-click copies it. Undefined = no box.
@@ -317,6 +324,28 @@ function toolResultText(message: unknown): string {
   return parts.join('\n')
 }
 
+/**
+ * Render one block to wrapped, styled lines, memoized by block identity for
+ * the given render params. `streaming` (the open assistant block whose text
+ * grows every chunk) and search mode bypass the cache — the former because
+ * its content changes each frame, the latter because the caller mutates the
+ * returned lines with search markers.
+ */
+function cachedRender(
+  state: TuiState, block: Block, width: number,
+  expandTools: boolean, showReasoning: boolean, streaming: boolean,
+): string[] {
+  if (!streaming) {
+    const hit = state.renderCache.get(block)
+    if (hit !== undefined && hit.width === width && hit.expand === expandTools && hit.reasoning === showReasoning) {
+      return hit.lines
+    }
+  }
+  const lines = renderBlock(block, width, expandTools, showReasoning)
+  if (!streaming) state.renderCache.set(block, { width, expand: expandTools, reasoning: showReasoning, lines })
+  return lines
+}
+
 /** Render one block to wrapped, styled lines. */
 function renderBlock(block: Block, width: number, expandTools: boolean, showReasoning: boolean): string[] {
   switch (block.kind) {
@@ -406,7 +435,13 @@ function renderFrame(state: TuiState): { lines: string[]; cursorRow: number; cur
     const block = blocks[bi]
     if (block === undefined) continue
     blockStarts.push(body.length)
-    const rendered = renderBlock(block, width, state.expandTools, state.showReasoning)
+    // Long-transcript virtualization: settled blocks render once and reuse
+    // their wrapped lines; the open streaming block and search mode render
+    // fresh (the former changes every chunk, the latter needs mutable rows).
+    const streaming = view !== undefined && view.openAssistant === block
+    const rendered = search !== undefined
+      ? renderBlock(block, width, state.expandTools, state.showReasoning)
+      : cachedRender(state, block, width, state.expandTools, state.showReasoning, streaming)
     // Search hits get a gutter marker; the focused one is bright and bold.
     if (search !== undefined && search.query !== '' && search.matches.includes(bi)) {
       const marker = bi === search.matches[search.current]
@@ -1794,6 +1829,7 @@ function setupFullScreen(
     onCopy() { copyLastReply(state, (t) => { addSystem(state, t, throttle) }) },
     onToggleReasoning() {
       state.showReasoning = !state.showReasoning
+      state.renderCache.clear() // reasoning visibility changes every block's rows
       addSystem(state, 'thinking: ' + (state.showReasoning ? 'shown (Ctrl+T hides)' : 'hidden (Ctrl+T shows)'), throttle)
     },
     onCycleModel() { void cycleModel(ctx, state, (t) => { addSystem(state, t, throttle) }) },
@@ -1801,6 +1837,7 @@ function setupFullScreen(
     onExternalEditor() { openExternalEditor(state, throttle) },
     onToggleExpand() {
       state.expandTools = !state.expandTools
+      state.renderCache.clear() // tool expansion changes every tool block's rows
       addSystem(state, state.expandTools ? 'tool output: expanded (Ctrl+O collapses)' : 'tool output: collapsed', throttle)
     },
     onShiftTab() {
@@ -1916,6 +1953,7 @@ export function apply(ctx: Context, config: Config): void {
     autoApprove: new Set(),
     showReasoning: true, titles: new Map(),
     subagents: new Map(),
+    renderCache: new Map(),
     search: undefined, searchMemory: '', blockStarts: [], idleInterruptAt: undefined,
     selection: undefined, bodyText: undefined, bodyRows: undefined,
   }
@@ -2066,6 +2104,8 @@ export function apply(ctx: Context, config: Config): void {
         if (block !== undefined) {
           if (diffs !== undefined) block.diffs = diffs
           else block.summary = toolResultText(event.data.message)
+          // The tool block mutated; its memoized rows are stale.
+          state.renderCache.delete(block)
         }
         break
       }
