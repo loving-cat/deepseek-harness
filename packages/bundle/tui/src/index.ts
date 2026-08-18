@@ -152,6 +152,13 @@ interface TuiState {
   presetArgsCache: readonly SuggestItem[] | undefined
   /** Sessions whose approvals auto-allow (the user chose 'a' at a prompt). */
   autoApprove: Set<string>
+  /**
+   * Live activity of sub-agent sessions (children of a view's session, e.g.
+   * dispatch_task / subagent tool calls). Keyed by String(session.id); the
+   * parent view renders a compact panel from it so multi-agent work is not
+   * silent. Not full transcripts — a status line per child.
+   */
+  subagents: Map<string, SubagentView>
   /** Ctrl+T: whether the assistant's reasoning (thinking) blocks are rendered. */
   showReasoning: boolean
   /** Explicit user names for sessions (/name), keyed by String(session.id). */
@@ -196,6 +203,17 @@ interface Throttle {
 
 type AssistantBlock = Extract<Block, { kind: 'assistant' }>
 type ToolBlock = Extract<Block, { kind: 'tool' }>
+
+/** Compact live status of one sub-agent session (subagent tool / dispatch_task children). */
+interface SubagentView {
+  parentId: string
+  busy: boolean
+  turnStartedAt: number | undefined
+  turns: number
+  lastTool: string | undefined
+  lastOutput: string | undefined
+  finished: boolean
+}
 
 const PROMPT_LABEL = ANSI.green + 'dsh > ' + ANSI.reset
 
@@ -400,6 +418,26 @@ function renderFrame(state: TuiState): { lines: string[]; cursorRow: number; cur
     body.push('')
   }
   state.blockStarts = blockStarts
+  // Sub-agent activity panel: one compact line per live/recent child, folded
+  // after the transcript so multi-agent work (subagent tool, dispatch_task)
+  // is visible without cluttering the main blocks.
+  const currentKey = state.current
+  const subLines: string[] = []
+  for (const [id, sv] of state.subagents) {
+    // Only children of the current view's session are shown here.
+    if (sv.parentId !== currentKey) continue
+    if (!sv.busy && sv.turns === 0 && sv.lastTool === undefined) continue
+    const spin = sv.busy ? (SPINNER[state.spinnerFrame % SPINNER.length] ?? '⠋') : (sv.finished ? '✓' : '○')
+    const elapsed = sv.busy && sv.turnStartedAt !== undefined ? ' ' + String(Math.floor((Date.now() - sv.turnStartedAt) / 1000)) + 's' : ''
+    const tool = sv.lastTool === undefined ? '' : ' ' + ANSI.cyan + sv.lastTool + ANSI.reset
+    const out = sv.lastOutput === undefined || sv.lastOutput === '' ? '' : ' ' + ANSI.dim + truncateAnsi(sv.lastOutput.replace(/\s+/g, ' ').trim(), 48) + ANSI.reset
+    subLines.push(ANSI.dim + '└─ ⚙ ' + ANSI.reset + '#' + id.slice(-6) + (sv.busy ? ANSI.brightYellow + ' ' + spin + elapsed + ANSI.reset : ANSI.dim + ' ' + spin + ' ' + String(sv.turns) + ' turns' + ANSI.reset) + tool + out)
+  }
+  if (subLines.length > 0) {
+    body.push(ANSI.dim + '╭─ subagents ' + '─'.repeat(Math.max(4, Math.min(24, width - 14))) + ANSI.reset)
+    body.push(...subLines)
+    body.push(ANSI.dim + '╰' + '─'.repeat(Math.max(2, Math.min(26, width - 2))) + ANSI.reset)
+  }
   const editor = state.editor
   const label = state.prompt !== undefined ? state.prompt.label
     : search !== undefined
@@ -1877,6 +1915,7 @@ export function apply(ctx: Context, config: Config): void {
     suggestRows: undefined, fileCache: undefined, modelArgsCache: new Map(), presetArgsCache: undefined,
     autoApprove: new Set(),
     showReasoning: true, titles: new Map(),
+    subagents: new Map(),
     search: undefined, searchMemory: '', blockStarts: [], idleInterruptAt: undefined,
     selection: undefined, bodyText: undefined, bodyRows: undefined,
   }
@@ -1885,8 +1924,60 @@ export function apply(ctx: Context, config: Config): void {
   ctx.on('session/event', (session, event) => {
     const key = String(session.id)
     const view = state.views.get(key)
-    if (view === undefined || state.quitting) return
+    if (state.quitting) return
     const isCurrent = state.current === key
+    // A session that is not one of our views is a sub-agent (subagent tool /
+    // dispatch_task child): fold a compact status line so multi-agent work is
+    // visible instead of silent. Keyed by its own id; the parent view renders
+    // the panel.
+    if (view === undefined) {
+      const header = session.header
+      if (header.parentSession !== undefined) {
+        const parentId = String(header.parentSession)
+        const sv = state.subagents.get(key) ?? {
+          parentId, busy: false, turnStartedAt: undefined, turns: 0,
+          lastTool: undefined, lastOutput: undefined, finished: false,
+        }
+        sv.parentId = parentId
+        switch (event.type) {
+          case 'turn/start':
+            sv.busy = true
+            sv.turnStartedAt = Date.now()
+            sv.finished = false
+            break
+          case 'turn/end':
+            sv.busy = false
+            sv.turns += 1
+            sv.finished = true
+            break
+          case 'tool/call':
+            sv.lastTool = event.data.name
+            sv.lastOutput = undefined
+            break
+          case 'tool/result': {
+            const text = toolResultText(event.data.message)
+            if (text !== '') sv.lastOutput = text.slice(0, 120)
+            break
+          }
+          case 'assistant/chunk': {
+            const chunk = event.data.chunk
+            if (chunk.type === 'text-delta') {
+              sv.lastOutput = ((sv.lastOutput ?? '') + chunk.text).slice(0, 120)
+            }
+            break
+          }
+          default:
+            break
+        }
+        state.subagents.set(key, sv)
+        // Repaint only when the current view is the parent (or we are viewing
+        // a session whose children these are).
+        if (isCurrent || (state.current !== undefined && parentId === state.current)) {
+          draw(state, throttle)
+        }
+      }
+      return
+    }
     switch (event.type) {
       case 'turn/start':
         view.busy = true
