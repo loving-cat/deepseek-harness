@@ -37,6 +37,7 @@ import { readClipboardImage, readClipboardText, writeClipboardText } from './cli
 import { addUsage, billedInput, emptyUsage, formatCache, formatTokens, type TokenUsageLike, type UsageTotals } from './usage.ts'
 import { scanFiles } from './files.ts'
 import { LineEditor, type SuggestItem } from './editor.ts'
+import { renderShellPanel, cleanCopiedLine } from './shellpanel.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'tui-runner'
@@ -244,6 +245,7 @@ const PROMPT_LABEL = ANSI.green + 'dsh > ' + ANSI.reset
 const SLASH_COMMANDS: readonly SuggestItem[] = [
   { value: 'help', description: 'show the command help' },
   { value: 'model', description: 'pick the model from a menu — /model <provider> <model> [effort] types it out' },
+  { value: 'setup', description: 'set the API key, base URL and model interactively (persisted to ~/.dsh)' },
   { value: 'preset', description: 'pick a preset from a menu — /preset <id> types it out' },
   { value: 'mode', description: 'pick a mode from a menu (标准/PTC/极简/创造) — blank session only' },
   { value: 'fork', description: 'branch this session — /fork [turn] rewinds to that turn' },
@@ -370,38 +372,7 @@ function closeSearch(state: TuiState): void {
   state.editor?.reset()
 }
 
-/** Parse the command out of a shell tool's JSON args (best effort). */
-function shellCommand(args: string): string {
-  try {
-    const parsed = JSON.parse(args) as { command?: unknown; cwd?: unknown }
-    if (typeof parsed.command === 'string') {
-      const cwd = typeof parsed.cwd === 'string' ? ' (in ' + parsed.cwd + ')' : ''
-      return parsed.command + cwd
-    }
-  } catch { /* not JSON */ }
-  return args.replace(/\s+/g, ' ').trim()
-}
 
-/**
- * Render a shell tool block as a bordered panel: command line, then the
- * output (dim, collapsed unless expanded), then a status row.
- */
-function renderShellPanel(block: ToolBlock, width: number, expandTools: boolean): string[] {
-  const inner = Math.max(1, width - 2)
-  const cmd = shellCommand(block.args)
-  const bar = '─'.repeat(Math.max(0, inner))
-  const out: string[] = [ANSI.cyan + '╭' + ANSI.reset + ' ' + ANSI.bold + block.name + ANSI.reset + ANSI.dim + ' ' + bar + ANSI.reset]
-  out.push(ANSI.cyan + '│' + ANSI.reset + ' ' + ANSI.green + '$ ' + ANSI.reset + truncateAnsi(cmd, inner - 2))
-  const summary = block.summary
-  if (summary !== undefined && summary !== '') {
-    const cap = expandTools ? 60 : 8
-    out.push(...wrapAnsi(ANSI.dim + '│ ' + summary + ANSI.reset, inner + 1).slice(0, cap))
-  } else {
-    out.push(ANSI.dim + '│ (no output)' + ANSI.reset)
-  }
-  out.push(ANSI.cyan + '╰' + ANSI.reset + ANSI.dim + bar + ANSI.reset)
-  return out
-}
 
 /**
  * Kitty graphics transmit+display APC sequence (base64, chunked). The image
@@ -795,7 +766,7 @@ function copySelection(state: TuiState, notify: (text: string) => void): void {
     if (top === bottom) c2 = right + 1 // right is inclusive; sliceVisible takes exclusive
     else if (r === top) c2 = Number.MAX_SAFE_INTEGER
     else if (r === bottom) { c1 = 0; c2 = right + 1 }
-    parts.push(sliceVisible(line, c1, c2 === Number.MAX_SAFE_INTEGER ? 1e9 : c2).trimEnd())
+    parts.push(cleanCopiedLine(sliceVisible(line, c1, c2 === Number.MAX_SAFE_INTEGER ? 1e9 : c2)).trimEnd())
   }
   const text = parts.join('\n')
   state.selection = undefined
@@ -1236,6 +1207,7 @@ function findToolBlock(view: SessionView, callId: string): ToolBlock | undefined
 
 const HELP_TEXT = [
   'Commands:',
+  '  /setup                         set API key / base URL / model interactively (saved to ~/.dsh)',
   '  /help                          show this help',
   '  /model                         pick a provider and model from the menu (current marked)',
   '  /model <provider> <model> [effort]   switch model directly (effort: off | high | max); /model <model> keeps the provider',
@@ -1330,6 +1302,19 @@ function switchModel(ctx: Context, state: TuiState, write: (text: string) => voi
   else { provider = one; model = two; effort = three === undefined ? current?.reasoningEffort : three }
   if (provider === undefined || model === undefined) { write('dsh: usage /model <provider> <model> [effort]'); return }
   if (effort !== undefined && !(REASONING_EFFORTS as readonly string[]).includes(effort)) { write('dsh: effort must be one of off | low | high | max'); return }
+  applyModelSelection(ctx, state, write, provider, model, effort)
+}
+
+/**
+ * Apply a model selection live and persist it as the boot default. Shared by
+ * `/model` and the `/setup` wizard. Cataloged providers refuse a model they
+ * never advertised (a stray token once became the saved default and 400'd
+ * every later boot); unknown/uncataloged providers pass through.
+ */
+function applyModelSelection(
+  ctx: Context, state: TuiState, write: (text: string) => void,
+  provider: string, model: string, effort?: string,
+): void {
   const llm = ctx.get('llm')
   const known = (llm?.listConfigurableProviders() ?? []).map(entry => entry.provider)
   const applySwitch = (): void => {
@@ -1358,6 +1343,54 @@ function switchModel(ctx: Context, state: TuiState, write: (text: string) => voi
     return
   }
   applySwitch()
+}
+
+/**
+ * `/setup` wizard: collect the API key, base URL and model through the modal
+ * prompt, apply each live and persist it. The API key goes to the managed
+ * credential store (`.credentials.yaml`), the base URL to the `llm-deepseek`
+ * settings section, and the model through the same path as `/model`. An empty
+ * answer skips that field; an empty base URL clears it back to the official
+ * endpoint.
+ */
+async function setupConfig(ctx: Context, state: TuiState, write: (text: string) => void): Promise<void> {
+  // The credential/settings services live in dsh-base; both augment Cordis's
+  // Context type from their own packages, but importing those main entries
+  // here would drag their sources into this bundle's rootDir. We only touch
+  // one method of each, so declare the minimal shapes locally.
+  const creds = ctx.get('credentials') as { set(ref: string, value: string): Promise<void> } | undefined
+  const settings = ctx.get('settings') as { update(ns: string, patch: object): Promise<void> } | undefined
+  if (creds === undefined) { write('dsh: credentials service unavailable (dsh-credentials not mounted)'); return }
+  const current = state.selectionRef?.current
+  // ① API key
+  const key = (await askUser(state, ANSI.bold + 'API key' + ANSI.reset + ' (sk-…, ' + ANSI.dim + 'leave empty to skip' + ANSI.reset + '):')).trim()
+  if (key !== '') {
+    try {
+      await creds.set('DEEPSEEK_API_KEY', key)
+      write(ANSI.brightGreen + 'API key stored ✓' + ANSI.reset + ' (effective for the next request)')
+    } catch (error) {
+      write('dsh: storing API key failed: ' + (error instanceof Error ? error.message : String(error)))
+    }
+  }
+  // ② base URL
+  const url = (await askUser(state, ANSI.bold + 'API base URL' + ANSI.reset + ' (https://…/v1, ' + ANSI.dim + 'empty = official endpoint' + ANSI.reset + '):')).trim()
+  if (url !== '') {
+    try {
+      await settings?.update('llm-deepseek', { baseURL: url })
+      write(ANSI.brightGreen + 'base URL set ✓' + ANSI.reset + ' (' + url + ')')
+    } catch (error) {
+      write('dsh: setting base URL failed: ' + (error instanceof Error ? error.message : String(error)))
+    }
+  }
+  // ③ model name — asks provider only when none is selected yet.
+  const provider = current?.provider ?? (await askUser(state, ANSI.bold + 'Provider' + ANSI.reset + ' (e.g. deepseek-official, ' + ANSI.dim + 'empty = skip' + ANSI.reset + '):')).trim()
+  const modelText = (await askUser(state, ANSI.bold + 'Model name' + ANSI.reset + ' (e.g. deepseek-v4-flash-0731, ' + ANSI.dim + 'empty = skip' + ANSI.reset + '):')).trim()
+  if (provider !== '' && modelText !== '') {
+    applyModelSelection(ctx, state, write, provider, modelText)
+  } else if (provider !== '' || modelText !== '') {
+    write('dsh: both provider and model are needed to switch — nothing changed')
+  }
+  write(ANSI.dim + '/setup done — saved under ~/.dsh (settings.yaml + .credentials.yaml)' + ANSI.reset)
 }
 
 /** Shift+Tab: cycle the reasoning effort (high → max → off → high), keeping provider/model. */
@@ -1473,6 +1506,7 @@ async function handleCommand(ctx: Context, state: TuiState, write: (text: string
   if (text === '/help') { write(HELP_TEXT); return true }
   if (text === '/model') { await pickModel(ctx, state, write); return true }
   if (text.startsWith('/model ')) { switchModel(ctx, state, write, text.slice('/model '.length)); return true }
+  if (text === '/setup') { await setupConfig(ctx, state, write); return true }
   if (text === '/preset') { await pickPresetMenu(ctx, state, write, { title: 'agent preset', verb: 'preset' }); return true }
   if (text.startsWith('/preset ')) { await switchPreset(ctx, state, write, text.slice('/preset '.length)); return true }
   if (text === '/mode') { await pickPresetMenu(ctx, state, write, { title: 'mode', verb: 'mode' }); return true }

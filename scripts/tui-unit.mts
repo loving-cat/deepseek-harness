@@ -684,5 +684,47 @@ function feed(rig: Rig, text: string): void { rig.stdin.emit('data', Buffer.from
   check('ansiLength skips APC mid-text', ansiLength('x' + apc + 'y') === 2)
 }
 
+// 29. shell panel frame rows fill exactly `width` (no wrap, no shatter)
+import { renderShellPanel, shellCommand, cleanCopiedLine } from '../packages/bundle/tui/src/shellpanel.ts'
+{
+  const W = 100
+  const lines = renderShellPanel({ name: 'bash', args: '{"command":"echo hi"}' }, W, false)
+  for (const [i, line] of lines.entries()) {
+    check('shell panel row ' + i + ' is <= width', ansiLength(line) <= W)
+  }
+  // Top frame: '╭ bash ' (7 cols) + bar must equal width exactly
+  const top = lines[0] ?? ''
+  check('top frame fills width exactly', ansiLength(top) === W)
+  check('bottom frame fills width exactly', ansiLength(lines[lines.length - 1] ?? '') === W)
+  // Command row carries the │ border and the $ prompt
+  check('command row has border', (lines[1] ?? '').includes('│'))
+  check('command row has prompt', (lines[1] ?? '').includes('$ '))
+}
+
+// 30. long commands wrap without a detached border (every row <= width)
+{
+  const W = 40
+  const long = '{"command":"' + 'x'.repeat(200) + '"}'
+  const lines = renderShellPanel({ name: 'bash', args: long }, W, false)
+  check('long command produces multiple rows', lines.length > 3)
+  for (const [i, line] of lines.entries()) {
+    check('long-cmd row ' + i + ' is <= width', ansiLength(line) <= W)
+  }
+  // all interior rows keep the │ border (top/bottom excluded)
+  const interior = lines.slice(1, -1)
+  check('all interior rows keep border', interior.every(l => l.includes('│')))
+}
+
+// 31. cleanCopiedLine strips frame chars for pasting into other tools
+{
+  check('content row keeps text', cleanCopiedLine('│ echo hi') === 'echo hi')
+  check('frame row empties', cleanCopiedLine('╭ bash ─────────────') === '')
+  check('frame bottom empties', cleanCopiedLine('╰─────────────────') === '')
+  check('code top empties', cleanCopiedLine('┌ json ⧉──────────') === '')
+  check('code content keeps text', cleanCopiedLine('│ { "a": 1 }') === '{ "a": 1 }')
+  check('plain text untouched', cleanCopiedLine('hello world') === 'hello world')
+  check('empty line untouched', cleanCopiedLine('') === '')
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed === 0 ? 0 : 1)

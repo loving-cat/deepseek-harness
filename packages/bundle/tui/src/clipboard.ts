@@ -87,9 +87,19 @@ export async function readClipboardImage(): Promise<ClipboardImage | undefined> 
 /** Read the clipboard's text, or undefined when empty / unreadable. */
 export async function readClipboardText(): Promise<string | undefined> {
   if (process.platform === 'win32') {
+    // Read as base64 of UTF-8 so PowerShell's console output code page (GBK on
+    // zh-CN) cannot mangle box-drawing or CJK text.
     for (const shell of ['powershell', 'pwsh']) {
-      const out = await probe(shell, ['-NoProfile', '-NonInteractive', '-Sta', '-Command', 'Get-Clipboard -Raw'])
-      if (out !== undefined) return out === '' ? undefined : out
+      const out = await probe(shell, ['-NoProfile', '-NonInteractive', '-Sta', '-Command', '$t=Get-Clipboard -Raw; if ($null -ne $t -and $t -ne "") { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($t)) }'])
+      if (out !== undefined) {
+        const trimmed = out.trim()
+        if (trimmed === '') return undefined
+        try {
+          return Buffer.from(trimmed, 'base64').toString('utf8')
+        } catch {
+          return undefined
+        }
+      }
     }
     return undefined
   }
@@ -103,8 +113,11 @@ export async function readClipboardText(): Promise<string | undefined> {
 
 /** Write text to the system clipboard (clip / pbcopy / wl-copy / xclip via stdin). */
 export function writeClipboardText(text: string): Promise<boolean> {
+  // win32: PowerShell Set-Clipboard — the native Unicode clipboard. clip.exe
+  // decodes stdin with the system code page (GBK on zh-CN), which mangles
+  // UTF-8 box-drawing and CJK text.
   const candidates: Array<[string, string[]]> = process.platform === 'win32'
-    ? [['clip', []]]
+    ? [['powershell', ['-NoProfile', '-Command', '[Console]::InputEncoding=[Text.Encoding]::UTF8; Set-Clipboard -Value ([Console]::In.ReadToEnd())']]]
     : process.platform === 'darwin'
       ? [['pbcopy', []]]
       : [['wl-copy', []], ['xclip', ['-selection', 'clipboard']]]

@@ -20,7 +20,7 @@ After the Loader settles, the runner creates one persisted Agent through `ctx.ag
 - **`todo/write`** feeds a live todo count in the status bar.
 - **`approval/request`** and **`ctx.userQuestions`** are answered inline at the prompt (number keys or free text; `y` grants once).
 
-Slash commands: `/help`, `/model`, `/preset`, `/fork [turn]`, `/new`, `/copy`, `/bell`, `/sessions`, `/exit` (also `/quit`). Typing `/` opens an autocomplete dropdown above the input — fuzzy case-insensitive filtering with a typo-tolerant fallback (edit distance ≤ 2, so `/molde` still offers `/model`); ↑/↓ navigate, **mouse click** or Tab completes, Enter applies (and runs slash commands), Esc dismisses. The same dropdown also completes **`@file-paths`** (cwd scan, gitignore-aware) and **command arguments** (`/model` → providers → models → efforts, `/preset`, `/fork` turn numbers). `/fork` branches the current session into a child and switches to it — with a turn number it rewinds the child's seed to that turn's end, with no argument a turn picker opens (or `latest`); the parent session stays live in the background. `/sessions` switches between the live sessions (each rendered with its own transcript/scroll/todos, status bar shows the count) or resumes a persisted one into a new live view. Ctrl+C interrupts the live turn; at an idle prompt it exits. Leaving mid-turn cancels the turn first (a flush of an open turn never resolves), waits bounded for the driver to go idle, flushes every live session, then requests exit through the launcher-provided `ctx.appExit`, with a hard process-exit backstop.
+Slash commands: `/help`, `/setup`, `/model`, `/preset`, `/fork [turn]`, `/new`, `/copy`, `/bell`, `/sessions`, `/exit` (also `/quit`). Typing `/` opens an autocomplete dropdown above the input — fuzzy case-insensitive filtering with a typo-tolerant fallback (edit distance ≤ 2, so `/molde` still offers `/model`); ↑/↓ navigate, **mouse click** or Tab completes, Enter applies (and runs slash commands), Esc dismisses. The same dropdown also completes **`@file-paths`** (cwd scan, gitignore-aware) and **command arguments** (`/model` → providers → models → efforts, `/preset`, `/fork` turn numbers). `/fork` branches the current session into a child and switches to it — with a turn number it rewinds the child's seed to that turn's end, with no argument a turn picker opens (or `latest`); the parent session stays live in the background. `/sessions` switches between the live sessions (each rendered with its own transcript/scroll/todos, status bar shows the count) or resumes a persisted one into a new live view. Ctrl+C interrupts the live turn; at an idle prompt it exits. Leaving mid-turn cancels the turn first (a flush of an open turn never resolves), waits bounded for the driver to go idle, flushes every live session, then requests exit through the launcher-provided `ctx.appExit`, with a hard process-exit backstop.
 
 ## Models and presets
 
@@ -28,6 +28,16 @@ Slash commands: `/help`, `/model`, `/preset`, `/fork [turn]`, `/new`, `/copy`, `
 - **`/preset`** lists the roster (shipped: `standard`, `code` = PTC 模式, `minimal` = 极简模式, `cordis` = Creator mode, plus user presets under `$DSH_HOME/.agent-presets`). **`/preset <id>`** re-links the blank agent via `ctx.agentPresets.recompose()` and records the durable `agent-preset/selected` event — valid only before the session's first message, after which the preset is fixed (start a new session with `--preset <id>` instead). The roster row mirrors the Web bundle (`default: standard`); agent creation mirrors the Web host: resolve before the session exists, `mount()` inside an async `setup` so failures roll creation back.
 
 Model and credentials come from the shared Harness home (`$DSH_HOME/settings.yaml`, `$DSH_HOME/.credentials.yaml`), same as the Web profile; `DEEPSEEK_API_KEY` in the environment also works. The default route is `deepseek-official / deepseek-v4-flash-0731` unless settings override it.
+
+### `/setup` — configure API key / base URL / model from inside the terminal
+
+For a fresh checkout (or to point the terminal at a different provider or gateway), **`/setup`** walks you through the three fields with the modal prompt and persists each one as you go — no file editing needed:
+
+1. **API key** — written to `$DSH_HOME/.credentials.yaml` through the `credentials` service (`DEEPSEEK_API_KEY` reference), effective for the next request. Leave empty to skip.
+2. **API base URL** — written to the `llm-deepseek` section of `$DSH_HOME/settings.yaml` (`baseURL`), effective for the next request. Leave empty to keep the official endpoint.
+3. **Provider + model name** — applied and persisted through the same path as `/model` (`ctx.agentDefaultModel.saveSelection`), so future sessions boot on it. Provider is only asked when none is selected yet; a stray model name that the cataloged provider never advertised is refused (same guard as `/model`).
+
+Each step applies immediately; the model change also updates the live selection so the next submitted step uses it. Everything lands in `~/.dsh` (or `$DSH_HOME`), shared with the Web/headless profiles.
 
 ## Model Experience
 

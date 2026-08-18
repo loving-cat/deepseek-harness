@@ -43,6 +43,12 @@
     },
     {
       "path": "../../preset/agent-presets"
+    },
+    {
+      "path": "../../credentials/credentials"
+    },
+    {
+      "path": "../../settings/settings"
     }
   ]
 }

@@ -1,0 +1,29 @@
+DeepSeek Harness — Fork Notice
+===============================
+
+This repository is a fork of
+[deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)
+(MIT License, Copyright (c) 2026 DeepSeek — see LICENSE).
+
+What this fork adds on top of upstream
+--------------------------------------
+
+* `packages/bundle/tui` — an interactive terminal profile (`dsh --profile tui`):
+  a full-screen, alternate-buffer agent runner over `dsh-base` with no Host,
+  HTTP, or browser layer. Includes the `tui-runner` plugin, a raw-mode line
+  editor with slash-command autocomplete, a markdown renderer, inline diff
+  rendering, multi-session switching (`/fork`, `/sessions`), and a session
+  resume picker.
+* `/setup` — an in-terminal wizard that configures and persists the API key,
+  base URL, and model (`~/.dsh/.credentials.yaml` + `~/.dsh/settings.yaml`).
+* Shell-tool rendering as a bordered panel (bash/pwsh/shell) with wrap-safe
+  frame widths and frame-stripping on selection copy.
+* Test assets under `scripts/`: `tui-unit.mts` (offline) and `tui-pty-e2e*.cjs`
+  (pty end-to-end).
+
+All additions are original work by the fork maintainer (吃瓜不吐皮呀) and are
+licensed under the same MIT license as the upstream project. Upstream's MIT
+copyright notice is preserved in LICENSE; this notice merely records what the
+fork changed, per the MIT license's attribution requirements.
+
+The upstream project has not reviewed or endorsed these changes.
