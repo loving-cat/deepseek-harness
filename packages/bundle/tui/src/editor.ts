@@ -95,6 +95,8 @@ export interface EditorCallbacks {
   onToggleReasoning?(): void
   /** Ctrl+P: cycle to the next model in the provider catalog (caller owns it). */
   onCycleModel?(): void
+  /** Alt+P: cycle to the previous model (reverse of Ctrl+P). */
+  onCycleModelReverse?(): void
   /** Ctrl+L: open the interactive model picker (caller owns it). */
   onModelPicker?(): void
   /** Ctrl+F: open transcript search (caller owns it; Esc closes it). */
@@ -308,6 +310,12 @@ export class LineEditor {
       if (ch === '\x1b' && (input[i + 1] === '\r' || input[i + 1] === '\n')) {
         // Alt+Enter (also Kitty's/Ghostty's shift+enter send_text mapping).
         this.insert('\n')
+        i += 2
+        continue
+      }
+      if (ch === '\x1b' && (input[i + 1] === 'p')) {
+        // Alt+P: reverse model cycle (Ctrl+Shift+P is eaten by Windows Terminal).
+        this.callbacks.onCycleModelReverse?.()
         i += 2
         continue
       }

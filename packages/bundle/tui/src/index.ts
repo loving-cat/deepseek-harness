@@ -175,6 +175,8 @@ interface TuiState {
   blockStarts: number[]
   /** Epoch ms of the last idle Ctrl+C (double-press quits; single clears input). */
   idleInterruptAt: number | undefined
+  /** Current git branch of the workspace (read once at boot; shown in the status bar). */
+  gitBranch: string | undefined
   /**
    * Render memoization for long-transcript virtualization: block identity →
    * its wrapped lines for given width/expand/reasoning params. Streaming
@@ -247,6 +249,18 @@ const SLASH_COMMANDS: readonly SuggestItem[] = [
  * Case-fold a slash command's name (arguments keep their case) and drop
  * trailing space, so /MODEL, '/model ' and '/Model deepseek-v4-pro-0813' all work.
  */
+/**
+ * Read the workspace's current git branch once at boot (spawnSync is too slow
+ * for the per-frame status bar; the branch rarely changes mid-session).
+ */
+function readGitBranch(cwd: string): string | undefined {
+  try {
+    const out = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd, encoding: 'utf8', timeout: 3000, windowsHide: true })
+    if (out.status === 0 && out.stdout.trim() !== '') return out.stdout.trim()
+  } catch { /* not a git repository */ }
+  return undefined
+}
+
 function normalizeCommand(text: string): string {
   const trimmed = text.trimEnd()
   if (!trimmed.startsWith('/')) return trimmed
@@ -435,9 +449,10 @@ function buildStatus(state: TuiState, width: number): string {
   const todos = view === undefined || view.todos.length === 0 ? '' : ' · ' + ANSI.brightMagenta + '☑ ' + String(view.todos.filter(t => t.status === 'completed').length) + '/' + String(view.todos.length) + ANSI.reset
   const sessions = state.views.size > 1 ? ' · ' + ANSI.dim + '⇄ ' + String(state.views.size) + ' sessions' + ANSI.reset : ''
   const preset = state.presetId === undefined ? '' : ' · ' + ANSI.brightCyan + (state.presetName ?? state.presetId) + ANSI.reset
-  // Greedily keep segments by priority: activity > sessions > todos > stats > preset.
+  const branch = state.gitBranch === undefined ? '' : ' · ' + ANSI.cyan + state.gitBranch + ANSI.reset
+  // Greedily keep segments by priority: activity > sessions > todos > stats > preset > branch.
   let out = ANSI.bold + 'dsh tui' + ANSI.reset + ' ' + ANSI.dim + model + ANSI.reset + ' ' + activity
-  for (const seg of [sessions, auto, todos, stats === '' ? '' : ANSI.dim + stats + ANSI.reset, preset]) {
+  for (const seg of [sessions, auto, todos, stats === '' ? '' : ANSI.dim + stats + ANSI.reset, preset, branch]) {
     if (seg !== '' && ansiLength(out + seg) <= width) out += seg
   }
   return out
@@ -1225,7 +1240,7 @@ function cycleEffort(ctx: Context, state: TuiState, write: (text: string) => voi
  * is located by provider+id; a model that disappeared from the catalog
  * starts the cycle at the first entry.
  */
-async function cycleModel(ctx: Context, state: TuiState, write: (text: string) => void): Promise<void> {
+async function cycleModel(ctx: Context, state: TuiState, write: (text: string) => void, reverse = false): Promise<void> {
   const llm = ctx.get('llm')
   const current = state.selectionRef?.current
   if (llm === undefined || current === undefined) { write('dsh: no model selection to cycle'); return }
@@ -1236,7 +1251,7 @@ async function cycleModel(ctx: Context, state: TuiState, write: (text: string) =
   }
   if (models.length === 0) { write('dsh: no models advertised'); return }
   const idx = models.findIndex(m => m.provider === current.provider && m.id === current.model)
-  const next = models[(idx + 1) % models.length]
+  const next = models[(((idx + (reverse ? -1 : 1)) % models.length) + models.length) % models.length]
   if (next === undefined) return
   switchModel(ctx, state, write, next.provider + ' ' + next.id)
 }
@@ -1472,6 +1487,7 @@ async function run(ctx: Context, config: Config, io: TuiIo, state: TuiState, thr
   }
   state.presetId = agentPreset
   state.presetName = undefined // resolved lazily by the first /preset | /mode roster read
+  state.gitBranch = readGitBranch(process.cwd())
 
   const agentOptions = { provider: selection.provider, model: selection.model }
   const meta = { cwd: process.cwd(), ...(agentPreset === undefined ? {} : { agentPreset }) }
@@ -1945,6 +1961,7 @@ function setupFullScreen(
       addSystem(state, 'thinking: ' + (state.showReasoning ? 'shown (Ctrl+T hides)' : 'hidden (Ctrl+T shows)'), throttle)
     },
     onCycleModel() { void cycleModel(ctx, state, (t) => { addSystem(state, t, throttle) }) },
+    onCycleModelReverse() { void cycleModel(ctx, state, (t) => { addSystem(state, t, throttle) }, true) },
     onModelPicker() { void pickModel(ctx, state, (t) => { addSystem(state, t, throttle) }) },
     onExternalEditor() {
       // The external-editor hand-over swaps the whole terminal; refuse while a
@@ -2075,6 +2092,7 @@ export function apply(ctx: Context, config: Config): void {
     subagents: new Map(),
     renderCache: new Map(),
     search: undefined, searchMemory: '', blockStarts: [], idleInterruptAt: undefined,
+    gitBranch: undefined,
     selection: undefined, bodyText: undefined, bodyRows: undefined,
   }
   const throttle: Throttle = { last: 0, timer: undefined }
