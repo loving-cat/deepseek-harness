@@ -24,7 +24,7 @@ import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import type { TodoItem } from '@deepseek-ai/dsh-session'
+import type { SessionEventMap, TodoItem } from '@deepseek-ai/dsh-session'
 import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import type { AskUserQuestionAnswer, AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
@@ -148,6 +148,10 @@ interface TuiState {
   presetArgsCache: readonly SuggestItem[] | undefined
   /** Sessions whose approvals auto-allow (the user chose 'a' at a prompt). */
   autoApprove: Set<string>
+  /** Ctrl+T: whether the assistant's reasoning (thinking) blocks are rendered. */
+  showReasoning: boolean
+  /** Explicit user names for sessions (/name), keyed by String(session.id). */
+  titles: Map<string, string>
   /**
    * App-internal mouse text selection: 0-based screen anchor/focus rows and
    * cols (row 0 = status bar, body starts at row 2). Left-drag sets it, the
@@ -188,6 +192,7 @@ const SLASH_COMMANDS: readonly SuggestItem[] = [
   { value: 'fork', description: 'branch this session — /fork [turn] rewinds to that turn' },
   { value: 'new', description: 'start a fresh session alongside this one' },
   { value: 'copy', description: 'copy the last reply to the clipboard (Ctrl+X)' },
+  { value: 'name', description: 'name the current session — /name <title> (shown in /sessions)' },
   { value: 'auto', description: 'toggle auto-approve for this session' },
   { value: 'bell', description: 'toggle the turn-end bell' },
   { value: 'sessions', description: 'switch between live sessions or resume a persisted one' },
@@ -253,8 +258,10 @@ function updateTitle(state: TuiState): void {
   if (term === undefined) return
   const view = currentView(state)
   const cwd = view?.agent.session.header.cwd ?? process.cwd()
+  const named = state.titles.get(String(view?.agent.session.id))
   const firstUser = view?.blocks.find(b => b.kind === 'user')
-  const label = firstUser === undefined ? '' : (firstUser.text.split('\n')[0] ?? '')
+  const first = firstUser === undefined ? '' : (firstUser.text.split('\n')[0] ?? '')
+  const label = named ?? first
   const short = label.length > 24 ? label.slice(0, 24) + '…' : label
   term.setTitle('dsh — ' + basename(cwd) + (short === '' ? '' : ' — ' + short))
 }
@@ -277,13 +284,13 @@ function toolResultText(message: unknown): string {
 }
 
 /** Render one block to wrapped, styled lines. */
-function renderBlock(block: Block, width: number, expandTools: boolean): string[] {
+function renderBlock(block: Block, width: number, expandTools: boolean, showReasoning: boolean): string[] {
   switch (block.kind) {
     case 'user':
       return wrapAnsi(ANSI.bold + ANSI.cyan + '❯ ' + ANSI.reset + renderInline(block.text), width)
     case 'assistant': {
       const out: string[] = []
-      if (block.reasoning !== undefined && block.reasoning !== '') {
+      if (block.reasoning !== undefined && block.reasoning !== '' && showReasoning) {
         // Muted light-gray italic thinking block (pi style), inline elements
         // restore the gray base instead of dropping it.
         const base = ANSI.gray + ANSI.italic
@@ -329,8 +336,10 @@ function buildStatus(state: TuiState, width: number): string {
     const inTok = view === undefined ? 0 : billedInput(view.usage)
     const totals = view === undefined || (inTok === 0 && view.usage.output === 0) ? '' : ' · ↑' + formatTokens(inTok) + ' ↓' + formatTokens(view.usage.output)
     const window = state.contextWindow
-    const last = view?.lastInputTokens
-    const ctxPct = window === undefined || last === undefined || window <= 0 ? '' : ' · ' + String(Math.min(999, Math.round((last / window) * 100))) + '% ctx'
+    const total = view === undefined ? 0 : billedInput(view.usage)
+    // Cumulative billed input over the window (a long conversation must grow
+    // past a single step's share); lastInputTokens stayed at ~1% forever.
+    const ctxPct = window === undefined || window <= 0 || total <= 0 ? '' : ' · ' + String(Math.min(999, Math.round((total / window) * 100))) + '% ctx'
     activity = ANSI.dim + ' ○ idle' + ANSI.reset
     stats = totals + ctxPct
   }
@@ -355,7 +364,7 @@ function renderFrame(state: TuiState): { lines: string[]; cursorRow: number; cur
   const view = currentView(state)
   const body: string[] = []
   for (const block of view?.blocks ?? []) {
-    body.push(...renderBlock(block, width, state.expandTools))
+    body.push(...renderBlock(block, width, state.expandTools, state.showReasoning))
     body.push('')
   }
   const editor = state.editor
@@ -884,6 +893,10 @@ const HELP_TEXT = [
   '  /fork [turn]                   branch into a child session and switch to it; [turn] rewinds to that turn',
   '  /new                           start a fresh session alongside this one',
   '  /bell                          toggle the turn-end bell',
+  '  /name <title>                  name the current session (shown in /sessions)',
+  '  Ctrl+T                          toggle the thinking (reasoning) display',
+  '  Ctrl+P                          cycle to the next model (provider catalog)',
+  '  Ctrl+L                          open the model picker menu',
   '  /auto                          toggle auto-approve for this session (approval prompts answer themselves)',
   '  /sessions                      switch between live sessions or resume a persisted one',
   '  /exit                          flush the session and quit (also Ctrl+C at idle, Ctrl+D on empty)',
@@ -1009,6 +1022,50 @@ function cycleEffort(ctx: Context, state: TuiState, write: (text: string) => voi
   write('effort → ' + next + (next === 'off' ? ' (reasoning disabled)' : ''))
 }
 
+/**
+ * Ctrl+P: cycle to the next model in the flattened provider catalog (wraps
+ * around), applying and persisting it through switchModel. The current model
+ * is located by provider+id; a model that disappeared from the catalog
+ * starts the cycle at the first entry.
+ */
+async function cycleModel(ctx: Context, state: TuiState, write: (text: string) => void): Promise<void> {
+  const llm = ctx.get('llm')
+  const current = state.selectionRef?.current
+  if (llm === undefined || current === undefined) { write('dsh: no model selection to cycle'); return }
+  const models: Array<{ provider: string; id: string }> = []
+  for (const entry of llm.listConfigurableProviders()) {
+    const list = await llm.listModels(entry.provider).catch(() => [])
+    for (const model of list) models.push({ provider: entry.provider, id: model.id })
+  }
+  if (models.length === 0) { write('dsh: no models advertised'); return }
+  const idx = models.findIndex(m => m.provider === current.provider && m.id === current.model)
+  const next = models[(idx + 1) % models.length]
+  if (next === undefined) return
+  switchModel(ctx, state, write, next.provider + ' ' + next.id)
+}
+
+/** /name <title>: pin an explicit user title on the current session (shown in /sessions). */
+function nameSession(state: TuiState, write: (text: string) => void, title: string): void {
+  const key = state.current
+  const view = currentView(state)
+  if (key === undefined || view === undefined) { write('dsh: no current session'); return }
+  const t = title.trim()
+  if (t === '') { write('usage: /name <title>'); return }
+  state.titles.set(key, t)
+  try {
+    // Explicit user rename: the source pins the title against regeneration.
+    // The session-title package extends SessionEventMap via a declare-module
+    // patch that this bundle cannot import (no build product), so the event
+    // type is asserted structurally.
+    const payload = { title: t, messageSeqs: [] as number[], source: { kind: 'user' as const } }
+    view.agent.session.append('session/title' as keyof SessionEventMap, payload as never)
+  } catch (error: unknown) {
+    write('dsh: ' + (error instanceof Error ? error.message : String(error)))
+  }
+  updateTitle(state)
+  write('session named → ' + t)
+}
+
 interface PresetPickerOpts { title: string; verb: string }
 
 /** Shared picker menu over the preset roster; /preset and /mode both use it. */
@@ -1071,6 +1128,7 @@ async function handleCommand(ctx: Context, state: TuiState, write: (text: string
     return true
   }
   if (text === '/copy') { copyLastReply(state, write); return true }
+  if (text.startsWith('/name ')) { nameSession(state, write, text.slice('/name '.length)); return true }
   return false
 }
 
@@ -1271,13 +1329,14 @@ async function run(ctx: Context, config: Config, io: TuiIo, state: TuiState, thr
     const entries: Entry[] = []
     for (const [id, v] of state.views) {
       const firstUser = v.blocks.find(b => b.kind === 'user')
-      const title = firstUser === undefined ? '' : (firstUser.text.split('\n')[0] ?? '')
+      const first = firstUser === undefined ? '' : (firstUser.text.split('\n')[0] ?? '')
+      const title = state.titles.get(id) ?? first
       entries.push({
         kind: 'live',
         id,
-        // Short id tail distinguishes forked siblings that share the same
-        // first user message (identical titles otherwise).
-        label: truncateAnsi(title === '' ? '(no user message yet)' : title, 48)
+        // A /name label wins; otherwise the first user message plus a short
+        // id tail distinguishes forked siblings with identical titles.
+        label: (state.titles.has(id) ? ANSI.brightGreen + '✦ ' + ANSI.reset : '') + truncateAnsi(title === '' ? '(no user message yet)' : title, 48)
           + ' ' + ANSI.dim + '#' + id.slice(-6) + ANSI.reset
           + (id === state.current ? ' ' + ANSI.dim + '(current)' + ANSI.reset : '')
           + (v.busy ? ' ' + ANSI.brightYellow + 'working' + ANSI.reset : ''),
@@ -1538,6 +1597,12 @@ function setupFullScreen(
       copySelection(state, (t) => { addSystem(state, t, throttle) })
     },
     onCopy() { copyLastReply(state, (t) => { addSystem(state, t, throttle) }) },
+    onToggleReasoning() {
+      state.showReasoning = !state.showReasoning
+      addSystem(state, 'thinking: ' + (state.showReasoning ? 'shown (Ctrl+T hides)' : 'hidden (Ctrl+T shows)'), throttle)
+    },
+    onCycleModel() { void cycleModel(ctx, state, (t) => { addSystem(state, t, throttle) }) },
+    onModelPicker() { void pickModel(ctx, state, (t) => { addSystem(state, t, throttle) }) },
     onExternalEditor() { openExternalEditor(state, throttle) },
     onToggleExpand() {
       state.expandTools = !state.expandTools
@@ -1636,6 +1701,7 @@ export function apply(ctx: Context, config: Config): void {
     spinnerTimer: undefined, spinnerFrame: 0, expandTools: false, bell: true, contextWindow: undefined,
     suggestRows: undefined, fileCache: undefined, modelArgsCache: new Map(), presetArgsCache: undefined,
     autoApprove: new Set(),
+    showReasoning: true, titles: new Map(),
     selection: undefined, bodyText: undefined, bodyRows: undefined,
   }
   const throttle: Throttle = { last: 0, timer: undefined }

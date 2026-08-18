@@ -89,6 +89,12 @@ export interface EditorCallbacks {
   onCopy?(): void
   /** Ctrl+G: open the external editor (caller owns the terminal hand-over). */
   onExternalEditor?(): void
+  /** Ctrl+T: toggle the reasoning (thinking) display (caller owns the flag). */
+  onToggleReasoning?(): void
+  /** Ctrl+P: cycle to the next model in the provider catalog (caller owns it). */
+  onCycleModel?(): void
+  /** Ctrl+L: open the interactive model picker (caller owns it). */
+  onModelPicker?(): void
 }
 
 /** One slash-command suggestion row. */
@@ -362,12 +368,14 @@ export class LineEditor {
       if (ch === '\x15') { this.killChain = false; this.kill(this.value); this.pushUndo(); this.lastAction = 'other'; this.value = ''; this.cursor = 0; this.pastes.clear(); this.pasteCounter = 0; this.callbacks.onChange(); i += 1; continue }
       if (ch === '\x16') { this.callbacks.onPasteImage?.(); i += 1; continue }
       if (ch === '\x17') { this.deleteWordBackward(); i += 1; continue }
-      if (ch === '\x0c') { this.callbacks.onChange(); i += 1; continue }
+      if (ch === '\x0c') { this.callbacks.onModelPicker?.(); i += 1; continue } // Ctrl+L
       if (ch === '\x0f') { this.callbacks.onToggleExpand?.(); i += 1; continue }
       if (ch === '\x07') { this.callbacks.onExternalEditor?.(); i += 1; continue }
       if (ch === '\x18') { this.callbacks.onCopy?.(); i += 1; continue }
       if (ch === '\x19') { this.yank(); i += 1; continue }
       if (ch === '\x1a') { this.undo(); i += 1; continue }
+      if (ch === '\x14') { this.callbacks.onToggleReasoning?.(); i += 1; continue } // Ctrl+T
+      if (ch === '\x10') { this.callbacks.onCycleModel?.(); i += 1; continue } // Ctrl+P
       // Printable character (also covers pasted multi-byte text).
       this.insert(ch)
       i += 1
