@@ -268,6 +268,8 @@ export class Term {
   private readonly stdout: NodeJS.WriteStream
   private entered = false
   private resizeListener: (() => void) | undefined
+  /** Padded rows of the last render, for the row-diff (undefined = no frame yet). */
+  private lastRaw: readonly string[] | undefined
 
   constructor(stdout: NodeJS.WriteStream = process.stdout) {
     this.stdout = stdout
@@ -332,21 +334,39 @@ export class Term {
   }
 
   /**
-   * Repaint the whole screen. Lines are clipped to the available height; the
-   * cursor is positioned at `frame.cursorRow/cursorCol`.
+   * Repaint the screen, writing only the rows whose padded text changed since
+   * the previous frame (pi-style row diff). A first frame or a resize (row
+   * count change) falls back to a full clear + repaint. Rows are always
+   * padded to the full width, so an overwrite never leaves stale tail
+   * characters; the caller guarantees every row's styling closes before the
+   * padding (wrapAnsi keeps ANSI per line), so an unchanged row below a
+   * changed one is not affected by a lingering SGR state.
    */
   render(frame: Frame): void {
     const height = this.height
     const width = this.width
-    const out: string[] = [ESC.clear]
+    const lines = frame.lines
+    const padded: string[] = []
     for (let r = 0; r < height; r += 1) {
-      const line = frame.lines[r]
-      const text = line === undefined ? '' : line
-      // Pad to the full row so repaints overwrite stale content.
+      const text = lines[r] ?? ''
       const visible = ansiLength(text)
-      const pad = visible < width ? ' '.repeat(width - visible) : ''
-      out.push('\x1b[' + String(r + 1) + ';1H' + text + pad)
+      padded.push(visible < width ? text + ' '.repeat(width - visible) : text)
     }
+    const out: string[] = []
+    const prev = this.lastRaw
+    // Compare the UNPADDED lines: two frames whose text differs only by a
+    // trailing-space edit (e.g. an autocomplete insertion of a space) pad to
+    // identical bytes, and a padded comparison would wrongly skip the write.
+    if (prev === undefined || prev.length !== height) {
+      out.push(ESC.clear)
+      for (let r = 0; r < height; r += 1) out.push('\x1b[' + String(r + 1) + ';1H' + (padded[r] ?? ''))
+    } else {
+      for (let r = 0; r < height; r += 1) {
+        const next = lines[r] ?? ''
+        if (next !== prev[r]) out.push('\x1b[' + String(r + 1) + ';1H' + (padded[r] ?? ''))
+      }
+    }
+    this.lastRaw = Array.from({ length: height }, (_, r) => lines[r] ?? '')
     const row = Math.max(1, Math.min(height, frame.cursorRow))
     const col = Math.max(1, Math.min(width, frame.cursorCol))
     out.push(ESC.showCursor + '\x1b[' + String(row) + ';' + String(col) + 'H')

@@ -601,5 +601,36 @@ function feed(rig: Rig, text: string): void { rig.stdin.emit('data', Buffer.from
   check('formatCache millions', formatCache(1_500_000) === ' · 缓存 1.5M')
 }
 
+// 26. row-diff rendering: first frame repaints, later frames write only changes
+{
+  const written: string[] = []
+  const stdout = { write(chunk: string) { written.push(chunk); return true }, on() {}, columns: 80, rows: 10, isTTY: true } as never
+  const term = new Term(stdout)
+  const rows10 = ['r0', 'r1', 'r2', 'r3', 'r4', 'r5', 'r6', 'r7', 'r8', 'r9']
+  const frame = (rows: string[]) => ({ lines: rows, cursorRow: 1, cursorCol: 1 })
+  term.render(frame(rows10))
+  const first = written.join('')
+  check('first frame clears', first.includes('\x1b[2J'))
+  check('first frame writes every row', ['\x1b[1;1H', '\x1b[5;1H', '\x1b[10;1H'].every(s => first.includes(s)))
+  const before = written.length
+  const changed = [...rows10]
+  changed[3] = 'r3-CHANGED'
+  term.render(frame(changed))
+  const second = written.slice(before).join('')
+  // The cursor is at row 1, so \x1b[1;1H appears as the trailing cursor
+  // address; assert on the untouched rows 5 and 7 instead.
+  check('diff rewrites only the changed row', second.includes('\x1b[4;1Hr3-CHANGED') && !second.includes('\x1b[5;1H') && !second.includes('\x1b[7;1H'))
+  check('diff has no full clear', !second.includes('\x1b[2J'))
+  const before2 = written.length
+  term.render(frame(changed)) // identical frame
+  const third = written.slice(before2).join('')
+  check('identical frame writes no row', !third.includes(';1Hr3-CHANGED') && !third.includes('\x1b[2J'))
+  const before3 = written.length
+  ;(stdout as { rows: number }).rows = 5 // terminal resize
+  term.render(frame(['only-5', 'rows'])) // row count changed → full repaint
+  const fourth = written.slice(before3).join('')
+  check('row-count change repaints fully', fourth.includes('\x1b[2J') && fourth.includes('\x1b[1;1Honly-5'))
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed === 0 ? 0 : 1)
