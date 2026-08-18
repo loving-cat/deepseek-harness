@@ -41,7 +41,7 @@ import type { AskUserQuestionAnswer, AskUserQuestionRequest } from '@deepseek-ai
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-cmdline'
 import type {} from '@deepseek-ai/dsh-agent-presets'
-import { ANSI, Term, ansiLength, inverseRange, sliceVisible, stripAnsi, truncateAnsi, wrapAnsi, wrappedCursor } from './term.ts'
+import { ANSI, Term, ansiLength, inverseRange, selectionRange, sliceVisible, stripAnsi, truncateAnsi, wrapAnsi, wrappedCursor } from './term.ts'
 import { renderInline, renderMarkdown } from './markdown.ts'
 import { diffsFromMeta, renderDiffs, type FileDiff } from './diff.ts'
 import { readClipboardImage, readClipboardText, writeClipboardText } from './clipboard.ts'
@@ -625,26 +625,22 @@ function renderFrame(state: TuiState): { lines: string[]; cursorRow: number; cur
   state.bodyRows = avail
   // Normalize the mouse-selection box (0-based screen rows; body starts at 2).
   const sel = state.selection
-  const box = sel === undefined ? undefined : {
-    top: Math.min(sel.anchor.row, sel.focus.row),
-    bottom: Math.max(sel.anchor.row, sel.focus.row),
-    left: Math.min(sel.anchor.col, sel.focus.col),
-    right: Math.max(sel.anchor.col, sel.focus.col),
-  }
+  // Text-flow selection (not a rectangle): the first row starts at the
+  // anchor/focus that comes first in reading order, middle rows span the
+  // full width, and the last row ends at the other endpoint — so a reverse
+  // drag highlights exactly the same text.
+  const range = sel === undefined ? undefined : selectionRange(sel.anchor, sel.focus)
   const lines: string[] = [truncateAnsi(buildStatus(state, width), width), ANSI.dim + '─'.repeat(Math.max(1, width - 1)) + ANSI.reset]
   for (let i = 0; i < window.length; i += 1) {
     const line = window[i] ?? ''
     // Window row i renders at 0-based screen row statusRows + i (2).
-    if (box !== undefined && statusRows + i >= box.top && statusRows + i <= box.bottom) {
-      let c1 = box.left
-      let c2 = Number.MAX_SAFE_INTEGER
-      const single = box.top === box.bottom
-      // box.right is inclusive (the last selected column); the range helpers
-      // take an exclusive end, so add one.
-      if (single) c2 = box.right + 1
-      else if (statusRows + i === box.top) c2 = Number.MAX_SAFE_INTEGER
-      else if (statusRows + i === box.bottom) { c1 = 0; c2 = box.right + 1 }
-      lines.push(inverseRange(line, c1, c2 === Number.MAX_SAFE_INTEGER ? 1e9 : c2))
+    const screenRow = statusRows + i
+    if (range !== undefined && screenRow >= range.start.row && screenRow <= range.end.row) {
+      const c1 = screenRow === range.start.row ? range.start.col : 0
+      // range.end.col is inclusive (the last selected column); inverseRange
+      // takes an exclusive end, so add one.
+      const c2 = screenRow === range.end.row ? range.end.col + 1 : 1e9
+      lines.push(inverseRange(line, c1, c2))
     } else {
       lines.push(line)
     }
@@ -773,20 +769,18 @@ function copySelection(state: TuiState, notify: (text: string) => void): void {
   const sel = state.selection
   const body = state.bodyText
   if (sel === undefined || body === undefined) { notify('no selection to copy — drag with the left button to select'); return }
-  const top = Math.min(sel.anchor.row, sel.focus.row) - 2
-  const bottom = Math.max(sel.anchor.row, sel.focus.row) - 2
-  const left = Math.min(sel.anchor.col, sel.focus.col)
-  const right = Math.max(sel.anchor.col, sel.focus.col)
+  // Same text-flow range as the rendered highlight — the copied text must
+  // match exactly what the user saw selected.
+  const { start, end } = selectionRange(sel.anchor, sel.focus)
+  const top = start.row - 2
+  const bottom = end.row - 2
   const parts: string[] = []
   for (let r = top; r <= bottom; r += 1) {
     const line = body[r]
     if (line === undefined) continue
-    let c1 = left
-    let c2 = Number.MAX_SAFE_INTEGER
-    if (top === bottom) c2 = right + 1 // right is inclusive; sliceVisible takes exclusive
-    else if (r === top) c2 = Number.MAX_SAFE_INTEGER
-    else if (r === bottom) { c1 = 0; c2 = right + 1 }
-    parts.push(cleanCopiedLine(sliceVisible(line, c1, c2 === Number.MAX_SAFE_INTEGER ? 1e9 : c2)).trimEnd())
+    const c1 = r === top ? start.col : 0
+    const c2 = r === bottom ? end.col + 1 : 1e9 // end.col is inclusive; sliceVisible takes exclusive
+    parts.push(cleanCopiedLine(sliceVisible(line, c1, c2)).trimEnd())
   }
   const text = parts.join('\n')
   state.selection = undefined

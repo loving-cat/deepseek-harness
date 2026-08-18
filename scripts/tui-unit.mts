@@ -782,5 +782,37 @@ import { sanitizePanelText } from '../packages/bundle/tui/src/shellpanel.ts'
   check('all rendered rows fit width', rowWrites.every(s => ansiLength(s.replace(/\x1b\[\?25h.*$/s, '')) <= 20 || s.includes('\x1b')))
 }
 
+// 36. selectionRange normalizes drag direction to text-flow order
+import { selectionRange } from '../packages/bundle/tui/src/term.ts'
+{
+  const fwd = selectionRange({ row: 2, col: 5 }, { row: 6, col: 30 })
+  check('forward drag keeps anchor as start', fwd.start.row === 2 && fwd.start.col === 5 && fwd.end.row === 6 && fwd.end.col === 30)
+  const rev = selectionRange({ row: 6, col: 30 }, { row: 2, col: 5 })
+  check('reverse drag swaps endpoints', rev.start.row === 2 && rev.start.col === 5 && rev.end.row === 6 && rev.end.col === 30)
+  const sameRow = selectionRange({ row: 4, col: 20 }, { row: 4, col: 8 })
+  check('same-row reverse swaps by col', sameRow.start.col === 8 && sameRow.end.col === 20)
+}
+
+// 37. drag-highlight spans full width on middle rows (the partial-highlight bug)
+{
+  // Simulate a drag from (row 2, col 7) to (row 4, col 12): middle row must
+  // highlight from column 0, not from the drag's start column.
+  const range = selectionRange({ row: 2, col: 7 }, { row: 4, col: 12 })
+  const rows = ['aaaaaaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbbbbbb', 'cccccccccccccccccccc']
+  const highlighted = rows.map((line, i) => {
+    const screenRow = 2 + i
+    if (screenRow < range.start.row || screenRow > range.end.row) return ''
+    const c1 = screenRow === range.start.row ? range.start.col : 0
+    const c2 = screenRow === range.end.row ? range.end.col + 1 : 1e9
+    const inv = inverseRange(line, c1, c2)
+    // inverseRange wraps with \x1b[7m … \x1b[27m; measure the highlighted span
+    const m = /^(.*?)\x1b\[7m(.*?)\x1b\[27m(.*)$/.exec(inv)
+    return m === null ? '' : stripAnsi(m[2] ?? '')
+  })
+  check('first row highlights from drag start col', highlighted[0] === 'aaaaaaaaaaaaa'.slice(0, 20 - 7))
+  check('middle row highlights full width', highlighted[1] === 'bbbbbbbbbbbbbbbbbbbb')
+  check('last row highlights up to drag end col', highlighted[2] === 'ccccccccccccc')
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed === 0 ? 0 : 1)

@@ -130,6 +130,21 @@ export function wrapAnsi(text: string, width: number): string[] {
   return lines
 }
 
+/** One endpoint of a mouse text selection (0-based screen row/col). */
+export interface SelectionPoint { row: number; col: number }
+
+/**
+ * Normalize a mouse selection to text-flow order: `start` is the endpoint
+ * that comes first in reading order (row-major, then column). Dragging from
+ * bottom-right to top-left must select the same text as the reverse drag —
+ * callers key the first row off `start` and the last row off `end`, middle
+ * rows always span the full width.
+ */
+export function selectionRange(anchor: SelectionPoint, focus: SelectionPoint): { start: SelectionPoint; end: SelectionPoint } {
+  const anchorFirst = anchor.row < focus.row || (anchor.row === focus.row && anchor.col <= focus.col)
+  return anchorFirst ? { start: anchor, end: focus } : { start: focus, end: anchor }
+}
+
 /**
  * Wrapped (row, col) of a character offset in text rendered at `width`.
  * Mirrors wrapAnsi's break rule (break when col + w > width and col > 0) and
