@@ -1,5 +1,5 @@
 // e2e9: Shift+Tab cycles reasoning effort (high → max → off → high) and
-// /mode cycles agent modes (standard → PTC → 极简 → 创造) on a blank session.
+// /mode opens an arrow-navigable mode picker on a blank session.
 const pty = require(require.resolve('node-pty', { paths: [require('node:path').join(__dirname, '../packages/subprocess/subprocess-local')] }))
 const fs = require('node:fs')
 const os = require('node:os')
@@ -34,14 +34,17 @@ const steps = [
   { name: 'effort -> off', wait: /effort → off/, send: null },
   { name: 'press shift+tab', wait: null, send: '\x1b[Z', delay: 800 },
   { name: 'effort -> high again', wait: /effort → high/, send: null },
-  // /mode: standard → PTC 模式 → 极简模式 → (cordis fails to mount here, skipped) → standard
+  // /mode: opens the mode picker (current marked); Enter applies the
+  // highlighted row; arrows move the highlight to pick a different mode.
   { name: 'mode cmd', wait: null, send: '/mode\r', delay: 800 },
-  { name: 'mode -> PTC', wait: /mode → PTC 模式/, send: null },
-  { name: 'mode cmd', wait: null, send: '/mode\r', delay: 800 },
-  { name: 'mode -> 极简', wait: /mode → 极简模式/, send: null },
-  { name: 'mode cmd', wait: null, send: '/mode\r', delay: 800 },
-  { name: 'cordis skipped', wait: /mode: cordis failed to mount, skipping/, send: null },
-  { name: 'mode -> standard (loop)', wait: /mode → 标准模式/, send: null },
+  { name: 'mode menu shows current', wait: /标准模式[\s\S]*\(current\)/, send: null },
+  { name: 'Enter applies current (standard)', wait: null, send: '\r', delay: 300 },
+  { name: 'mode -> standard', wait: /mode → standard — 标准模式/, send: null },
+  { name: 'mode cmd again', wait: null, send: '/mode\r', delay: 300 },
+  { name: 'mode menu shows again', wait: /标准模式[\s\S]*\(current\)/, send: null },
+  { name: 'down to PTC', wait: null, send: '\x1b[B', delay: 150 },
+  { name: 'Enter applies PTC', wait: null, send: '\r', delay: 300 },
+  { name: 'mode -> code — PTC 模式', wait: /mode → code — PTC 模式/, send: null },
   { name: 'exit', wait: null, send: '\x15/exit\r', delay: 800 },
 ]
 let stepIndex = 0

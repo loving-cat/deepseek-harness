@@ -45,6 +45,13 @@ const steps = [
   { name: 'preset roster listed', need: () => count(/(标准模式|极简模式|创造模式)/) >= 1 },
   { name: 'Enter applies preset', send: '\r', delay: 800 },
   { name: 'preset switch applied', need: () => count(/preset → |the preset is fixed/) >= 1 },
+  // /mode shares the same picker machinery with a 'mode' title (the count
+  // gates on the bold 'mode' title so stale 'agent preset' frames can't match).
+  { name: 'open /mode menu', send: '/mode\r', delay: 300 },
+  { name: 'mode menu shows current', need: () => count(/\x1b\[1mmode\x1b\[[0-9;]*m/) >= 1 && count(/标准模式/) >= 1 },
+  { name: 'down to PTC', send: '\x1b[B', delay: 150 },
+  { name: 'Enter applies PTC', send: '\r', delay: 300 },
+  { name: 'mode switch applied', need: () => count(/mode → code — PTC 模式/) >= 1 },
   { name: 'exit', send: '\x15/exit\r', delay: 800 },
 ]
 let stepIndex = 0
