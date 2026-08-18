@@ -61,8 +61,11 @@ export class CordisInspectRegistryService extends Service {
    */
   register(registration: HostCordisInspectProviderRegistration): () => void {
     const manifest = validateManifest(registration.manifest)
-    if (this.providers.has(manifest.id)) throw new Error(`Host Cordis inspect provider "${manifest.id}" is already registered`)
     const stored = { ...registration, manifest }
+    // A preset switch re-mounts tool-cordis while the previous mount's effect
+    // is still alive (recompose keeps agent effects), so the same provider id
+    // comes around. Treat it as a replacement (last-wins) rather than failing
+    // the whole preset; the previous disposer becomes a no-op by identity.
     this.providers.set(manifest.id, stored)
     return () => {
       if (this.providers.get(manifest.id) === stored) this.providers.delete(manifest.id)
