@@ -79,6 +79,12 @@ export interface EditorCallbacks {
   onRecallPending?(): void
   /** SGR mouse press: 1-based col/row (reporting is always on; the caller only acts while a dropdown is open). */
   onMousePress?(col: number, row: number): void
+  /** SGR mouse drag with the left button held (button 32/35 motion events). */
+  onMouseMove?(col: number, row: number): void
+  /** SGR mouse button release (the caller keeps the selection rendered). */
+  onMouseUp?(): void
+  /** SGR right-button press (the caller copies a selection, if any). */
+  onRightClick?(col: number, row: number): void
   /** Ctrl+X: copy the last reply to the clipboard (caller owns it). */
   onCopy?(): void
   /** Ctrl+G: open the external editor (caller owns the terminal hand-over). */
@@ -521,7 +527,11 @@ export class LineEditor {
     if (mouse !== null) {
       if (mouse[4] === 'M') {
         const btn = Number(mouse[1] ?? '0')
-        if (btn === 0) this.callbacks.onMousePress?.(Number(mouse[2] ?? '0'), Number(mouse[3] ?? '0'))
+        const col = Number(mouse[2] ?? '0')
+        const row = Number(mouse[3] ?? '0')
+        if (btn === 0) this.callbacks.onMousePress?.(col, row)
+        else if (btn === 2) this.callbacks.onRightClick?.(col, row)
+        else if (btn === 32 || btn === 35) this.callbacks.onMouseMove?.(col, row) // left/middle drag motion
         else if (btn === 64) {
           if (this.callbacks.onWheelUp !== undefined) this.callbacks.onWheelUp()
           else this.callbacks.onScrollUp?.()
@@ -529,6 +539,8 @@ export class LineEditor {
           if (this.callbacks.onWheelDown !== undefined) this.callbacks.onWheelDown()
           else this.callbacks.onScrollDown?.()
         }
+      } else {
+        this.callbacks.onMouseUp?.()
       }
       return
     }

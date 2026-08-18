@@ -188,6 +188,62 @@ export function truncateAnsi(text: string, width: number): string {
   return out + '…'
 }
 
+/**
+ * Wrap an inverse-video (\x1b[7m / \x1b[27m) pair around the visible column
+ * range [startCol, endCol) of an ANSI string. Styling sequences pass through
+ * untouched; a wide (CJK) character whose box straddles a boundary is kept
+ * whole on the highlight side. Out-of-range columns clamp to the text.
+ */
+export function inverseRange(text: string, startCol: number, endCol: number): string {
+  if (startCol >= endCol || endCol <= 0 || text === '') return text
+  const s = Math.max(0, startCol)
+  let out = ''
+  let col = 0
+  let on = false
+  let i = 0
+  const n = text.length
+  while (i < n) {
+    const ch = text[i] ?? ''
+    if (ch === '\x1b') {
+      const m = /^\x1b\[[0-9;:<=>?]*[a-zA-Z]/.exec(text.slice(i))
+      if (m?.[0] !== undefined) { out += m[0]; i += m[0].length; continue }
+      out += ch; i += 1; continue
+    }
+    const w = charWidth(ch)
+    if (!on && col < endCol && col + w > s) { out += '\x1b[7m'; on = true }
+    out += ch
+    col += w
+    if (on && col >= endCol) { out += '\x1b[27m'; on = false }
+    i += 1
+  }
+  if (on) out += '\x1b[27m'
+  return out
+}
+
+/**
+ * Extract the visible characters in the column range [startCol, endCol) of
+ * an ANSI string, dropping all styling. Used to copy a mouse selection.
+ */
+export function sliceVisible(text: string, startCol: number, endCol: number): string {
+  let out = ''
+  let col = 0
+  let i = 0
+  const n = text.length
+  while (i < n) {
+    const ch = text[i] ?? ''
+    if (ch === '\x1b') {
+      const m = /^\x1b\[[0-9;:<=>?]*[a-zA-Z]/.exec(text.slice(i))
+      if (m?.[0] !== undefined) { i += m[0].length; continue }
+      i += 1; continue
+    }
+    const w = charWidth(ch)
+    if (col >= startCol && col < endCol) out += ch
+    col += w
+    i += 1
+  }
+  return out
+}
+
 /** A terminal frame: rendered lines plus where the input cursor should sit. */
 export interface Frame {
   /** Complete rendered screen lines (with ANSI), top to bottom. */

@@ -30,7 +30,7 @@ import type { AskUserQuestionAnswer, AskUserQuestionRequest } from '@deepseek-ai
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-cmdline'
 import type {} from '@deepseek-ai/dsh-agent-presets'
-import { ANSI, Term, ansiLength, truncateAnsi, wrapAnsi, wrappedCursor } from './term.ts'
+import { ANSI, Term, ansiLength, inverseRange, sliceVisible, stripAnsi, truncateAnsi, wrapAnsi, wrappedCursor } from './term.ts'
 import { renderInline, renderMarkdown } from './markdown.ts'
 import { diffsFromMeta, renderDiffs, type FileDiff } from './diff.ts'
 import { readClipboardImage, readClipboardText, writeClipboardText } from './clipboard.ts'
@@ -148,6 +148,16 @@ interface TuiState {
   presetArgsCache: readonly SuggestItem[] | undefined
   /** Sessions whose approvals auto-allow (the user chose 'a' at a prompt). */
   autoApprove: Set<string>
+  /**
+   * App-internal mouse text selection: 0-based screen anchor/focus rows and
+   * cols (row 0 = status bar, body starts at row 2). Left-drag sets it, the
+   * renderer highlights the box, right-click copies it. Undefined = no box.
+   */
+  selection: { anchor: { row: number; col: number }; focus: { row: number; col: number } } | undefined
+  /** Plain-text body window rows of the last render (selection copy source). */
+  bodyText: string[] | undefined
+  /** Body rows available in the last render (selection click zone). */
+  bodyRows: number | undefined
 }
 
 /** Process-facing effects. */
@@ -380,8 +390,35 @@ function renderFrame(state: TuiState): { lines: string[]; cursorRow: number; cur
   const scroll = view?.scroll ?? 0
   const bodyStart = Math.max(0, body.length - avail - scroll)
   const window = body.slice(bodyStart, bodyStart + avail)
+  // Selection copy source: plain text of the rendered body window.
+  state.bodyText = window.map(stripAnsi)
+  state.bodyRows = avail
+  // Normalize the mouse-selection box (0-based screen rows; body starts at 2).
+  const sel = state.selection
+  const box = sel === undefined ? undefined : {
+    top: Math.min(sel.anchor.row, sel.focus.row),
+    bottom: Math.max(sel.anchor.row, sel.focus.row),
+    left: Math.min(sel.anchor.col, sel.focus.col),
+    right: Math.max(sel.anchor.col, sel.focus.col),
+  }
   const lines: string[] = [truncateAnsi(buildStatus(state, width), width), ANSI.dim + '─'.repeat(Math.max(1, width - 1)) + ANSI.reset]
-  lines.push(...window)
+  for (let i = 0; i < window.length; i += 1) {
+    const line = window[i] ?? ''
+    // Window row i renders at 0-based screen row statusRows + i (2).
+    if (box !== undefined && statusRows + i >= box.top && statusRows + i <= box.bottom) {
+      let c1 = box.left
+      let c2 = Number.MAX_SAFE_INTEGER
+      const single = box.top === box.bottom
+      // box.right is inclusive (the last selected column); the range helpers
+      // take an exclusive end, so add one.
+      if (single) c2 = box.right + 1
+      else if (statusRows + i === box.top) c2 = Number.MAX_SAFE_INTEGER
+      else if (statusRows + i === box.bottom) { c1 = 0; c2 = box.right + 1 }
+      lines.push(inverseRange(line, c1, c2 === Number.MAX_SAFE_INTEGER ? 1e9 : c2))
+    } else {
+      lines.push(line)
+    }
+  }
   while (lines.length < height - bottomRows) lines.push('')
   lines.push(...suggestLines)
   lines.push(...inputLines)
@@ -494,6 +531,38 @@ function copyLastReply(state: TuiState, notify: (text: string) => void): void {
   if (text === '') { notify('nothing to copy yet'); return }
   void writeClipboardText(text).then((ok) => {
     notify(ok ? 'copied the last reply (' + String(text.length) + ' chars)' : 'clipboard write failed (no clip/pbcopy/wl-copy/xclip)')
+  })
+}
+
+/**
+ * Copy the current mouse-selection box (from the last rendered body window)
+ * to the clipboard and dismiss it. Rows/cols are 0-based screen coordinates;
+ * the body starts at screen row 2, so body window row = screen row - 2.
+ */
+function copySelection(state: TuiState, notify: (text: string) => void): void {
+  const sel = state.selection
+  const body = state.bodyText
+  if (sel === undefined || body === undefined) { notify('no selection to copy — drag with the left button to select'); return }
+  const top = Math.min(sel.anchor.row, sel.focus.row) - 2
+  const bottom = Math.max(sel.anchor.row, sel.focus.row) - 2
+  const left = Math.min(sel.anchor.col, sel.focus.col)
+  const right = Math.max(sel.anchor.col, sel.focus.col)
+  const parts: string[] = []
+  for (let r = top; r <= bottom; r += 1) {
+    const line = body[r]
+    if (line === undefined) continue
+    let c1 = left
+    let c2 = Number.MAX_SAFE_INTEGER
+    if (top === bottom) c2 = right + 1 // right is inclusive; sliceVisible takes exclusive
+    else if (r === top) c2 = Number.MAX_SAFE_INTEGER
+    else if (r === bottom) { c1 = 0; c2 = right + 1 }
+    parts.push(sliceVisible(line, c1, c2 === Number.MAX_SAFE_INTEGER ? 1e9 : c2).trimEnd())
+  }
+  const text = parts.join('\n')
+  state.selection = undefined
+  if (text.trim() === '') { notify('selection was empty'); return }
+  void writeClipboardText(text).then((ok) => {
+    notify(ok ? 'copied selection (' + String(text.length) + ' chars)' : 'clipboard write failed (no clip/pbcopy/wl-copy/xclip)')
   })
 }
 
@@ -821,7 +890,7 @@ const HELP_TEXT = [
   'While the agent works, Ctrl+C interrupts; typing then Enter queues a follow-up (Alt+Up recalls it); Ctrl+O expands tool output.',
   'Editor: / opens command autocomplete (also completes @file-paths and command args); click or Tab completes; Enter runs.',
   'Ctrl+Z undo · Ctrl+Y yank · Ctrl+X copy last reply · Ctrl+G external editor ($EDITOR).',
-  'While the agent works, Ctrl+C interrupts; PageUp/PageDown or the wheel scroll the history (Shift+drag selects text); Shift+Enter inserts a newline (Alt+Enter works too).',
+  'While the agent works, Ctrl+C interrupts; drag with the left button to select text and right-click or Ctrl+C copies it (Shift+drag selects natively); PageUp/PageDown or the wheel scroll the history; Shift+Enter inserts a newline (Alt+Enter works too).',
   'Typing / opens command autocomplete (fuzzy, case-insensitive); Tab completes, Enter runs, Esc closes.',
   'Large pastes collapse into [paste #N …] markers; Ctrl+V / Alt+V pastes an image from the clipboard (path inserted).',
 ].join('\n')
@@ -1357,11 +1426,18 @@ function setupFullScreen(
         return
       }
       target.blocks.push({ kind: 'user', text: command })
+      state.selection = undefined
       target.busy = true
       target.agent.followup(createUserMessage({ content: [{ type: 'text', text: command }], source: { kind: 'user' } }))
       draw(state, throttle)
     },
     onInterrupt() {
+      // Ctrl+C with a live selection copies it (the terminal-native copy
+      // habit) instead of interrupting the model or quitting the app.
+      if (state.selection !== undefined) {
+        copySelection(state, (t) => { addSystem(state, t, throttle) })
+        return
+      }
       const current = currentView(state)
       if (current !== undefined && current.busy) { current.agent.cancel({ kind: 'user' }); addSystem(state, '(interrupting…)', throttle) }
       else { quit(0) }
@@ -1434,10 +1510,32 @@ function setupFullScreen(
       }
       return []
     },
-    onMousePress(_col, row) {
+    onMousePress(col, row) {
       const rows = state.suggestRows
-      if (rows === undefined || row < rows.start || row >= rows.start + rows.count) return
-      editor.applySuggestAt(row - rows.start)
+      if (rows !== undefined && row >= rows.start && row < rows.start + rows.count) {
+        editor.applySuggestAt(row - rows.start)
+        return
+      }
+      // Body zone (0-based screen row 2..2+bodyRows): start a selection box;
+      // anywhere else (status/input) dismisses it. Columns are 1-based SGR.
+      const bodyRows = state.bodyRows ?? 0
+      if (row - 1 >= 2 && row - 1 < 2 + bodyRows) {
+        state.selection = { anchor: { row: row - 1, col: col - 1 }, focus: { row: row - 1, col: col - 1 } }
+      } else {
+        state.selection = undefined
+      }
+      draw(state, throttle)
+    },
+    onMouseMove(col, row) {
+      if (state.selection === undefined) return
+      state.selection.focus = { row: row - 1, col: col - 1 }
+      draw(state, throttle)
+    },
+    onMouseUp() {
+      // The box stays rendered until copied or dismissed (right-click copies).
+    },
+    onRightClick(_col, _row) {
+      copySelection(state, (t) => { addSystem(state, t, throttle) })
     },
     onCopy() { copyLastReply(state, (t) => { addSystem(state, t, throttle) }) },
     onExternalEditor() { openExternalEditor(state, throttle) },
@@ -1457,22 +1555,26 @@ function setupFullScreen(
       addSystem(state, 'recalled the queue into the editor', throttle)
     },
     onScrollUp() {
+      state.selection = undefined
       const current = currentView(state)
       if (current !== undefined) current.scroll += Math.max(1, term.height - 4)
       draw(state, throttle)
     },
     onScrollDown() {
+      state.selection = undefined
       const current = currentView(state)
       if (current !== undefined) current.scroll = Math.max(0, current.scroll - Math.max(1, term.height - 4))
       draw(state, throttle)
     },
     // Wheel: a few lines per notch (unlike PageUp/PageDown's page step).
     onWheelUp() {
+      state.selection = undefined
       const current = currentView(state)
       if (current !== undefined) current.scroll += 3
       draw(state, throttle)
     },
     onWheelDown() {
+      state.selection = undefined
       const current = currentView(state)
       if (current !== undefined) current.scroll = Math.max(0, current.scroll - 3)
       draw(state, throttle)
@@ -1534,6 +1636,7 @@ export function apply(ctx: Context, config: Config): void {
     spinnerTimer: undefined, spinnerFrame: 0, expandTools: false, bell: true, contextWindow: undefined,
     suggestRows: undefined, fileCache: undefined, modelArgsCache: new Map(), presetArgsCache: undefined,
     autoApprove: new Set(),
+    selection: undefined, bodyText: undefined, bodyRows: undefined,
   }
   const throttle: Throttle = { last: 0, timer: undefined }
 
@@ -1548,6 +1651,7 @@ export function apply(ctx: Context, config: Config): void {
         view.turnStartedAt = Date.now()
         view.turnUsage = emptyUsage()
         view.streamUsage = undefined
+        state.selection = undefined // a fresh turn shifts the body window
         if (isCurrent) {
           startSpinner(state, throttle)
           state.term?.setProgress(true)

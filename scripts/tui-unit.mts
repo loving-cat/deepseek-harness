@@ -3,7 +3,7 @@
 import { EventEmitter } from 'node:events'
 import { LineEditor } from '../packages/bundle/tui/src/editor.ts'
 import { renderMarkdown } from '../packages/bundle/tui/src/markdown.ts'
-import { Term, wrappedCursor } from '../packages/bundle/tui/src/term.ts'
+import { Term, inverseRange, sliceVisible, wrappedCursor } from '../packages/bundle/tui/src/term.ts'
 import { addUsage, billedInput, emptyUsage, formatTokens } from '../packages/bundle/tui/src/usage.ts'
 import { readClipboardText, writeClipboardText } from '../packages/bundle/tui/src/clipboard.ts'
 
@@ -577,6 +577,20 @@ function feed(rig: Rig, text: string): void { rig.stdin.emit('data', Buffer.from
   check('meta bad shape rejected', diffsFromMeta({ diffs: 'nope' }) === undefined)
   const multi = renderDiffs([{ path: 'a', oldText: null, newText: 'x' }], 20)
   check('renderDiffs ends with blank row', multi.at(-1) === '')
+}
+
+// 24. mouse-selection helpers: inverse-range highlight and visible-column slice
+{
+  check('inverseRange single cols', inverseRange('abcdef', 1, 4) === 'a\x1b[7mbcd\x1b[27mef')
+  check('inverseRange empty range', inverseRange('abcdef', 3, 3) === 'abcdef')
+  check('inverseRange out of range clamps', inverseRange('abc', 0, 100) === '\x1b[7mabc\x1b[27m')
+  check('inverseRange wide CJK boundary', inverseRange('a你b', 0, 2) === '\x1b[7ma你\x1b[27mb')
+  check('inverseRange keeps ANSI passthrough', inverseRange('\x1b[1mab\x1b[22m', 1, 2) === '\x1b[1ma\x1b[7mb\x1b[27m\x1b[22m')
+  check('inverseRange negative start clamps to 0', inverseRange('abc', -1, 2) === '\x1b[7mab\x1b[27mc')
+  check('sliceVisible basic', sliceVisible('abcdef', 1, 4) === 'bcd')
+  check('sliceVisible strips ANSI', sliceVisible('\x1b[31mab\x1b[0mcd', 0, 4) === 'abcd')
+  check('sliceVisible wide CJK', sliceVisible('a你b', 1, 3) === '你')
+  check('sliceVisible end clamp', sliceVisible('abc', 0, 99) === 'abc')
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)
