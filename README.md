@@ -62,6 +62,8 @@ What was added on top of upstream:
 
 - `packages/bundle/tui` — the terminal profile (`tui-runner` plugin + editor + renderer)
 - `/setup` command for interactive API key / base URL / model configuration
+- **Alt+1 sandbox trust with dangerous-workspace auto-downgrade** — launching in a drive root (`D:`), the user home, or the temp dir would break the Windows ACL sandbox (a whole-disk ACL grant needs admin rights; a home-root grant escapes into the temp tree). The terminal detects those roots at boot, downgrades the session to **read-only**, and shows `read-only (Alt+1 trust)` in the status bar. Press **Alt+1** to opt the session into `workspace-write` trust — the choice persists in the session log across restarts, so you only decide once.
+- Wrap-safe shell panels — bash/pwsh/shell tool output renders as a bordered panel whose frame never exceeds the terminal width (tabs are expanded, control characters stripped, overwide rows clamped), so long commands and wide `Out-String` output no longer shatter the panel.
 - `scripts/tui-unit.mts` + `scripts/tui-pty-e2e*.cjs` — offline and pty test assets
 
 See [`packages/bundle/tui/README.md`](packages/bundle/tui/README.md) for the full terminal guide.

@@ -29,12 +29,28 @@ export function shellCommand(args: string): string {
 }
 
 /**
+ * Sanitize raw tool text before it enters the panel: a literal Tab is 4
+ * columns to `charWidth` but the terminal expands it to the next 8-column
+ * stop, so a wrapped row that measured within budget can render wider than
+ * `width` and spill over the next row's │ border. A stray carriage return
+ * rewinds the cursor and overwrites the border outright. Expand tabs to
+ * spaces, drop CR and other C0 controls so measured width == rendered width.
+ */
+export function sanitizePanelText(text: string): string {
+  return text
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '')
+    .replace(/\t/g, '    ')
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+}
+
+/**
  * Render a shell tool block as a bordered panel: command line, then the
  * output (dim, collapsed unless expanded), then a status row.
  */
 export function renderShellPanel(block: ShellPanelBlock, width: number, expandTools: boolean): string[] {
   const inner = Math.max(1, width - 2)
-  const cmd = shellCommand(block.args)
+  const cmd = sanitizePanelText(shellCommand(block.args))
   const nameLen = ansiLength(block.name)
   // Top frame: '╭ bash ' occupies nameLen + 3 columns, the bar fills the rest.
   const topBar = '─'.repeat(Math.max(0, inner - nameLen - 1))
@@ -47,7 +63,7 @@ export function renderShellPanel(block: ShellPanelBlock, width: number, expandTo
   cmdLines.forEach((line) => {
     out.push(ANSI.cyan + '│' + ANSI.reset + ' ' + line)
   })
-  const summary = block.summary
+  const summary = block.summary === undefined ? undefined : sanitizePanelText(block.summary)
   if (summary !== undefined && summary !== '') {
     const cap = expandTools ? 60 : 8
     // Wrap the output to the inner width; every row carries its own │ so the

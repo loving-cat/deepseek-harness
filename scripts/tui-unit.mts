@@ -738,5 +738,49 @@ import { isDangerousWorkspaceRoot } from '../packages/bundle/tui/src/shellpanel.
   check('Documents is not the home root itself', isDangerousWorkspaceRoot('C:\\Users\\XL\\Documents', env) === false)
 }
 
+// 33. sanitizePanelText: tabs expand to spaces, CR/control chars dropped
+import { sanitizePanelText } from '../packages/bundle/tui/src/shellpanel.ts'
+{
+  check('tab expands to 4 spaces', sanitizePanelText('a\tb') === 'a    b')
+  check('CRLF normalizes to LF', sanitizePanelText('a\r\nb') === 'a\nb')
+  check('lone CR dropped', sanitizePanelText('a\rb') === 'ab')
+  check('control chars dropped', sanitizePanelText('a\x07\x01b') === 'ab')
+  check('plain text untouched', sanitizePanelText('hello world') === 'hello world')
+}
+
+// 34. panel with tabbed/indented output never exceeds width (the screenshot bug)
+{
+  const W = 60
+  // Simulates PowerShell Format-Table + tab-indented output that used to wrap past the frame
+  const summary = 'col1\tcol2\tcol3\n' + 'x'.repeat(150) + '\n    indented\ttext'
+  const lines = renderShellPanel({ name: 'pwsh', args: '{"command":"Get-Thing"}', summary }, W, true)
+  for (const [i, line] of lines.entries()) {
+    check('tabbed panel row ' + i + ' <= width', ansiLength(line) <= W)
+  }
+  // no literal tab survives into the rendered rows
+  check('no raw tab in rendered rows', lines.every(l => !l.includes('\t')))
+}
+
+// 35. Term.render clamps overwide rows instead of letting them wrap (defense in depth)
+{
+  const stdout = Object.assign(new EventEmitter(), {
+    isTTY: true,
+    columns: 20,
+    rows: 3,
+    written: [] as string[],
+    write(chunk: string) { this.written.push(chunk); return true },
+  })
+  const term = new Term(stdout as never)
+  const wide = 'x'.repeat(50)
+  term.render({ lines: ['short', wide, 'ok'], cursorRow: 1, cursorCol: 1 })
+  const out = stdout.written.join('')
+  // the overwide middle row must be truncated to the terminal width (… + reset)
+  check('overwide row is clamped', out.includes('…'))
+  check('clamp appends reset', out.includes('\x1b[0m'))
+  // every written row fits the terminal width
+  const rowWrites = out.split(/\x1b\[\d+;1H/).filter(s => s.length > 0 && !s.startsWith('\x1b[2J'))
+  check('all rendered rows fit width', rowWrites.every(s => ansiLength(s.replace(/\x1b\[\?25h.*$/s, '')) <= 20 || s.includes('\x1b')))
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed === 0 ? 0 : 1)

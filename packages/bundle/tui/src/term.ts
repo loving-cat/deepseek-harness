@@ -359,7 +359,12 @@ export class Term {
     for (let r = 0; r < height; r += 1) {
       const text = lines[r] ?? ''
       const visible = ansiLength(text)
-      padded.push(visible < width ? text + ' '.repeat(width - visible) : text)
+      // A row wider than the terminal wraps and spills into the next row,
+      // overwriting that row's leading characters (a panel's │ border). Clamp
+      // every row to `width` — a truncated row beats a shattered screen.
+      padded.push(visible < width ? text + ' '.repeat(width - visible)
+        : visible > width ? truncateAnsi(text, width) + ANSI.reset
+          : text)
     }
     const out: string[] = []
     const prev = this.lastRaw
