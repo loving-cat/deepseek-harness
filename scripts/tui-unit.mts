@@ -814,5 +814,39 @@ import { selectionRange } from '../packages/bundle/tui/src/term.ts'
   check('last row highlights up to drag end col', highlighted[2] === 'ccccccccccccc')
 }
 
+// 38. RenderCache: params+version keyed memoization with LRU eviction
+{
+  const { RenderCache } = await import('../packages/bundle/tui/src/rendercache.ts')
+  const cache = new RenderCache(3)
+  const a = { kind: 'assistant' }
+  const b = { kind: 'tool' }
+  const c = { kind: 'system' }
+  const d = { kind: 'user' }
+  const base = { width: 80, expand: false, reasoning: true, version: 0 }
+  const linesA = ['a1', 'a2']
+  check('cache miss on empty', cache.get(a, base) === undefined)
+  cache.set(a, base, linesA)
+  check('cache hit returns the stored array', cache.get(a, base) === linesA)
+  check('version mismatch misses', cache.get(a, { ...base, version: 1 }) === undefined)
+  check('width mismatch misses', cache.get(a, { ...base, width: 40 }) === undefined)
+  check('expand mismatch misses', cache.get(a, { ...base, expand: true }) === undefined)
+  check('reasoning mismatch misses', cache.get(a, { ...base, reasoning: false }) === undefined)
+  cache.set(a, { ...base, version: 5 }, ['a-v5'])
+  check('re-set with a new version hits on that version', cache.get(a, { ...base, version: 5 })?.[0] === 'a-v5')
+  check('old version entry was overwritten', cache.get(a, base) === undefined)
+  cache.set(b, base, ['b'])
+  cache.set(c, base, ['c'])
+  cache.set(a, { ...base, version: 5 }, ['a-v5b']) // refresh a's recency
+  cache.set(d, base, ['d']) // exceeds cap 3 → evicts oldest (b)
+  check('LRU evicts the oldest entry past the cap', cache.get(b, base) === undefined)
+  check('recently refreshed entry survives eviction', cache.get(a, { ...base, version: 5 })?.[0] === 'a-v5b')
+  check('newest entry present', cache.get(d, base)?.[0] === 'd')
+  check('c and d fill the rest of the cap', cache.size === 3)
+  cache.delete(c)
+  check('delete removes the entry', cache.get(c, base) === undefined)
+  cache.clear()
+  check('clear empties the cache', cache.size === 0)
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed === 0 ? 0 : 1)

@@ -43,6 +43,7 @@ import type {} from '@deepseek-ai/dsh-cmdline'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import { ANSI, Term, ansiLength, inverseRange, selectionRange, sliceVisible, stripAnsi, truncateAnsi, wrapAnsi, wrappedCursor } from './term.ts'
 import { renderInline, renderMarkdown } from './markdown.ts'
+import { RenderCache } from './rendercache.ts'
 import { diffsFromMeta, renderDiffs, type FileDiff } from './diff.ts'
 import { readClipboardImage, readClipboardText, writeClipboardText } from './clipboard.ts'
 import { addUsage, billedInput, emptyUsage, formatCache, formatTokens, type TokenUsageLike, type UsageTotals } from './usage.ts'
@@ -87,6 +88,8 @@ interface ImageMeta {
   name?: string
   /** Base64 payload, filled asynchronously after the block is created. */
   data?: string
+  /** Load failed (or no attachments service): keep the placeholder forever. */
+  failed?: boolean
 }
 
 /** Kitty graphics is supported by kitty and WezTerm (Windows Terminal does not expose it). */
@@ -127,6 +130,8 @@ interface SessionView {
   scroll: number
   todos: TodoItem[]
   openAssistant: AssistantBlock | undefined
+  /** Tool blocks still streaming their arguments (tool-call-delta live set). */
+  openTools: Set<ToolBlock>
   /** Follow-ups typed while the agent was busy; auto-sent oldest-first at turn/end. */
   pending: string[]
   /** Cumulative billed tokens across the whole session. */
@@ -209,19 +214,21 @@ interface TuiState {
   gitBranch: string | undefined
   /**
    * Render memoization for long-transcript virtualization: block identity →
-   * its wrapped lines for given width/expand/reasoning params. Streaming
-   * (open) assistant blocks and search mode bypass it; tool/result mutations
-   * and expand/reasoning toggles invalidate the affected/all entries.
+   * wrapped lines for given width/expand/reasoning params plus a content
+   * version for mutable blocks (streaming text / tool args / image count).
+   * Blocks with image bytes in flight bypass it; tool/result mutations and
+   * expand/reasoning toggles invalidate the affected/all entries.
    */
-  renderCache: Map<Block, { width: number; expand: boolean; reasoning: boolean; lines: string[] }>
+  renderCache: RenderCache
   /**
    * App-internal mouse text selection: 0-based screen anchor/focus rows and
    * cols (row 0 = status bar, body starts at row 2). Left-drag sets it, the
    * renderer highlights the box, right-click copies it. Undefined = no box.
    */
   selection: { anchor: { row: number; col: number }; focus: { row: number; col: number } } | undefined
-  /** Plain-text body window rows of the last render (selection copy source). */
-  bodyText: string[] | undefined
+  /** Styled body window rows of the last render; copy consumers (selection,
+   * code-block click) stripAnsi on demand so idle frames pay nothing. */
+  bodyWindow: string[] | undefined
   /** Body rows available in the last render (selection click zone). */
   bodyRows: number | undefined
 }
@@ -311,6 +318,7 @@ function currentView(state: TuiState): SessionView | undefined {
 function addView(state: TuiState, agent: Agent, handle: { dispose(): Promise<void> }): SessionView {
   const view: SessionView = {
     agent, handle, blocks: [], busy: false, scroll: 0, todos: [], openAssistant: undefined,
+    openTools: new Set(),
     pending: [], usage: emptyUsage(), turnUsage: emptyUsage(), streamUsage: undefined,
     lastInputTokens: undefined, turnStartedAt: undefined,
   }
@@ -405,24 +413,39 @@ function kittyTransmit(base64: string, width: number, height: number): string {
 }
 
 /**
+ * Memoized kitty transmit keyed by ImageMeta identity: the (potentially
+ * large) APC string is built once per image instead of once per frame. The
+ * row-diff re-emits it when the image scrolls back in — that path reuses the
+ * cached string, so no per-frame rebuild ever happens.
+ */
+const kittyMemo = new WeakMap<ImageMeta, string>()
+function kittyTransmitFor(img: ImageMeta): string {
+  const hit = kittyMemo.get(img)
+  if (hit !== undefined) return hit
+  const built = kittyTransmit(img.data ?? '', img.width, img.height)
+  kittyMemo.set(img, built)
+  return built
+}
+
+/**
  * Render one block to wrapped, styled lines, memoized by block identity for
- * the given render params. `streaming` (the open assistant block whose text
- * grows every chunk) and search mode bypass the cache — the former because
- * its content changes each frame, the latter because the caller mutates the
- * returned lines with search markers.
+ * the given render params plus a content `version` covering mutable blocks
+ * (streaming text / tool args / image count — a spinner-only frame reuses
+ * the cache because the version did not move). `bypass` skips the cache
+ * entirely (image bytes still in flight: the rows change when they land).
  */
 function cachedRender(
   state: TuiState, block: Block, width: number,
-  expandTools: boolean, showReasoning: boolean, streaming: boolean,
+  expandTools: boolean, showReasoning: boolean,
+  bypass: boolean, version: number,
 ): string[] {
-  if (!streaming) {
-    const hit = state.renderCache.get(block)
-    if (hit !== undefined && hit.width === width && hit.expand === expandTools && hit.reasoning === showReasoning) {
-      return hit.lines
-    }
+  const params = { width, expand: expandTools, reasoning: showReasoning, version }
+  if (!bypass) {
+    const hit = state.renderCache.get(block, params)
+    if (hit !== undefined) return hit
   }
   const lines = renderBlock(block, width, expandTools, showReasoning)
-  if (!streaming) state.renderCache.set(block, { width, expand: expandTools, reasoning: showReasoning, lines })
+  if (!bypass) state.renderCache.set(block, params, lines)
   return lines
 }
 
@@ -452,7 +475,7 @@ function renderBlock(block: Block, width: number, expandTools: boolean, showReas
       // rows, so reserve the rows so following content does not overlap.
       for (const img of block.images ?? []) {
         if (KITTY_GRAPHICS && img.data !== undefined) {
-          out.push(kittyTransmit(img.data, img.width, img.height))
+          out.push(kittyTransmitFor(img))
         }
         out.push(ANSI.dim + '🖼 ' + (img.name ?? 'image') + ' (' + String(img.width) + 'x' + String(img.height) + ')' + ANSI.reset)
         const rows = Math.max(1, Math.ceil(img.height / 16))
@@ -538,25 +561,31 @@ function renderFrame(state: TuiState): { lines: string[]; cursorRow: number; cur
   const blockStarts: number[] = []
   const search = state.search
   const blocks = view?.blocks ?? []
+  // Search membership is consulted per block — a Set keeps that O(1).
+  const matchSet = search !== undefined && search.query !== '' ? new Set(search.matches) : undefined
   for (let bi = 0; bi < blocks.length; bi += 1) {
     const block = blocks[bi]
     if (block === undefined) continue
     blockStarts.push(body.length)
     // Long-transcript virtualization: settled blocks render once and reuse
-    // their wrapped lines; the open streaming block and search mode render
-    // fresh (the former changes every chunk, the latter needs mutable rows).
-    // Image blocks carry async-loaded bytes (and a per-frame kitty transmit),
-    // so they render fresh like the streaming block.
-    const streaming = (view !== undefined && view.openAssistant === block)
-      || ('images' in block && ((block as { images?: ImageMeta[] }).images ?? []).length > 0)
-    const rendered = search !== undefined
-      ? renderBlock(block, width, state.expandTools, state.showReasoning)
-      : cachedRender(state, block, width, state.expandTools, state.showReasoning, streaming)
+    // their wrapped lines. Mutable blocks (the open streaming assistant, a
+    // tool call streaming its arguments) carry a content version so frames
+    // where nothing changed reuse the cache too; image blocks whose bytes
+    // are still in flight bypass it (their rows change when the payload lands).
+    const images = block.kind === 'assistant' ? block.images : undefined
+    const imagesPending = KITTY_GRAPHICS && images !== undefined && images.some(img => img.data === undefined && img.failed !== true)
+    let version = 0
+    if (view !== undefined && block.kind === 'assistant' && view.openAssistant === block) version += block.text.length + (block.reasoning?.length ?? 0)
+    if (images !== undefined && images.length > 0) version += images.length
+    if (view !== undefined && block.kind === 'tool' && view.openTools.has(block)) version += block.args.length
+    let rendered = cachedRender(state, block, width, state.expandTools, state.showReasoning, imagesPending, version)
     // Search hits get a gutter marker; the focused one is bright and bold.
-    if (search !== undefined && search.query !== '' && search.matches.includes(bi)) {
+    // Copy the lines before marking — the cached array is shared state.
+    if (search !== undefined && matchSet !== undefined && matchSet.has(bi)) {
       const marker = bi === search.matches[search.current]
         ? ANSI.brightCyan + ANSI.bold + '▍' + ANSI.reset
         : ANSI.dim + '·' + ANSI.reset
+      rendered = rendered.slice()
       rendered[0] = marker + ' ' + (rendered[0] ?? '')
     }
     body.push(...rendered)
@@ -620,8 +649,9 @@ function renderFrame(state: TuiState): { lines: string[]; cursorRow: number; cur
   const scroll = view?.scroll ?? 0
   const bodyStart = Math.max(0, body.length - avail - scroll)
   const window = body.slice(bodyStart, bodyStart + avail)
-  // Selection copy source: plain text of the rendered body window.
-  state.bodyText = window.map(stripAnsi)
+  // Copy sources (selection / code-block click) stripAnsi this on demand —
+  // storing the reference costs nothing per frame.
+  state.bodyWindow = window
   state.bodyRows = avail
   // Normalize the mouse-selection box (0-based screen rows; body starts at 2).
   const sel = state.selection
@@ -767,7 +797,7 @@ function copyLastReply(state: TuiState, notify: (text: string) => void): void {
  */
 function copySelection(state: TuiState, notify: (text: string) => void): void {
   const sel = state.selection
-  const body = state.bodyText
+  const body = state.bodyWindow?.map(stripAnsi)
   if (sel === undefined || body === undefined) { notify('no selection to copy — drag with the left button to select'); return }
   // Same text-flow range as the rendered highlight — the copied text must
   // match exactly what the user saw selected.
@@ -796,7 +826,7 @@ function copySelection(state: TuiState, notify: (text: string) => void): void {
  * opens the block and the `└` row closes it; code rows drop their `│` border.
  */
 function extractCodeAt(state: TuiState, bodyRow: number): string | undefined {
-  const body = state.bodyText
+  const body = state.bodyWindow?.map(stripAnsi)
   if (body === undefined) return undefined
   const topLine = body[bodyRow]
   if (topLine === undefined || !topLine.trimStart().startsWith('┌')) return undefined
@@ -1003,20 +1033,29 @@ function extractImages(content: unknown): ImageMeta[] {
 }
 
 /** Read an attachment's bytes into the block's image meta (best effort). */
-async function loadImageBytes(ctx: Context, block: { images?: ImageMeta[] }): Promise<void> {
+async function loadImageBytes(ctx: Context, block: { images?: ImageMeta[] }, onDone?: () => void): Promise<void> {
   const attachments = ctx.get('attachments') as { readImage(ref: { attachmentId: string }, signal?: AbortSignal): Promise<{ data: Uint8Array }> } | undefined
-  if (attachments === undefined) return
+  let settled = false
   for (const img of block.images ?? []) {
-    if (img.data !== undefined) continue
+    if (img.data !== undefined || img.failed === true) continue
+    settled = true
+    if (attachments === undefined) { img.failed = true; continue }
     try {
       const stored = await attachments.readImage({ attachmentId: img.attachmentId })
       img.data = Buffer.from(stored.data).toString('base64')
-    } catch { /* missing or unreadable image: keep the placeholder */ }
+    } catch {
+      // Missing or unreadable image: keep the placeholder, and stop bypassing
+      // the render cache — a permanently-pending image re-renders every frame.
+      img.failed = true
+    }
   }
+  // Freshly-settled images change the block's rows (kitty transmit appears /
+  // the cache starts accepting it) — repaint so it shows without further input.
+  if (settled) onDone?.()
 }
 
 /** Rebuild a view's transcript from its session's existing events (resume/fork replay). */
-function replayHistory(ctx: Context, view: SessionView): void {
+function replayHistory(ctx: Context, view: SessionView, onImageDone?: () => void): void {
   view.blocks = []
   view.todos = []
   view.openAssistant = undefined
@@ -1031,7 +1070,7 @@ function replayHistory(ctx: Context, view: SessionView): void {
         if (text !== '' || images.length > 0) {
           const block: Block = { kind: 'assistant', text, ...(images.length > 0 ? { images } : {}) }
           view.blocks.push(block)
-          if (images.length > 0) void loadImageBytes(ctx, block)
+          if (images.length > 0) void loadImageBytes(ctx, block, onImageDone)
         }
         const usage = event.data.usage
         if (usage !== undefined) {
@@ -1804,7 +1843,7 @@ async function run(ctx: Context, config: Config, io: TuiIo, state: TuiState, thr
   }
   const view = addView(state, handle.agent, handle)
   await view.agent.whenIdle()
-  replayHistory(ctx, view)
+  replayHistory(ctx, view, () => { if (!state.quitting) draw(state, throttle) })
 
   /** Fork the current session into a live child; [turn] rewinds the seed to that turn's end. */
   const fork = async (turn?: number): Promise<void> => {
@@ -1833,7 +1872,7 @@ async function run(ctx: Context, config: Config, io: TuiIo, state: TuiState, thr
       const child = await agents.create({ sessionId: SessionId('session-' + randomUUID()), meta: forkMeta, seed, agentOptions, setup })
       const childView = addView(state, child.agent, child)
       await child.agent.whenIdle()
-      replayHistory(ctx, childView)
+      replayHistory(ctx, childView, () => { if (!state.quitting) draw(state, throttle) })
       updateTitle(state)
       const where = turn === undefined ? 'latest point' : 'turn ' + String(turn)
       addSystem(state, 'forked @ ' + where + ' → ' + String(child.agent.id) + ANSI.dim + ' (parent kept alive — /sessions to switch)' + ANSI.reset, throttle)
@@ -1947,7 +1986,7 @@ async function run(ctx: Context, config: Config, io: TuiIo, state: TuiState, thr
       const resumed = await agents.resume({ resumeSessionId: SessionId(entry.id), agentOptions, setup })
       const resumedView = addView(state, resumed.agent, resumed)
       await resumed.agent.whenIdle()
-      replayHistory(ctx, resumedView)
+      replayHistory(ctx, resumedView, () => { if (!state.quitting) draw(state, throttle) })
       updateTitle(state)
       addSystem(state, 'resumed → ' + entry.id, throttle)
     } catch (error: unknown) {
@@ -1961,7 +2000,7 @@ async function run(ctx: Context, config: Config, io: TuiIo, state: TuiState, thr
       const created = await agents.create({ sessionId: SessionId('session-' + randomUUID()), meta, agentOptions, setup })
       const freshView = addView(state, created.agent, created)
       await created.agent.whenIdle()
-      replayHistory(ctx, freshView)
+      replayHistory(ctx, freshView, () => { if (!state.quitting) draw(state, throttle) })
       updateTitle(state)
       addSystem(state, 'new session → ' + String(created.agent.id), throttle)
     } catch (error: unknown) {
@@ -2358,10 +2397,10 @@ export function apply(ctx: Context, config: Config): void {
     autoApprove: new Set(),
     showReasoning: true, titles: new Map(),
     subagents: new Map(),
-    renderCache: new Map(),
+    renderCache: new RenderCache(),
     search: undefined, searchMemory: '', blockStarts: [], idleInterruptAt: undefined,
     gitBranch: undefined,
-    selection: undefined, bodyText: undefined, bodyRows: undefined,
+    selection: undefined, bodyWindow: undefined, bodyRows: undefined,
   }
   const throttle: Throttle = { last: 0, timer: undefined }
 
@@ -2445,6 +2484,7 @@ export function apply(ctx: Context, config: Config): void {
         view.turnStartedAt = Date.now()
         view.turnUsage = emptyUsage()
         view.streamUsage = undefined
+        view.openTools.clear()
         state.selection = undefined // a fresh turn shifts the body window
         if (isCurrent) {
           startSpinner(state, throttle)
@@ -2464,10 +2504,13 @@ export function apply(ctx: Context, config: Config): void {
           view.openAssistant = undefined
           const pending = findToolBlock(view, callId)
           if (pending === undefined) {
-            view.blocks.push({ kind: 'tool', name: chunk.name ?? '', args: chunk.argumentsDelta, callId })
+            const live: ToolBlock = { kind: 'tool', name: chunk.name ?? '', args: chunk.argumentsDelta, callId }
+            view.blocks.push(live)
+            view.openTools.add(live)
           } else {
             if (chunk.name !== undefined && chunk.name !== '') pending.name = chunk.name
             pending.args += chunk.argumentsDelta
+            view.openTools.add(pending)
           }
         }
         else if (chunk.type === 'usage') {
@@ -2491,7 +2534,7 @@ export function apply(ctx: Context, config: Config): void {
         if (images.length > 0) {
           const b = ensureAssistant(view)
           b.images = (b.images ?? []).concat(images)
-          void loadImageBytes(ctx, b)
+          void loadImageBytes(ctx, b, () => { if (!state.quitting) draw(state, throttle) })
         }
         const usage = event.data.usage
         if (usage !== undefined) {
@@ -2521,6 +2564,10 @@ export function apply(ctx: Context, config: Config): void {
         if (pending !== undefined) {
           pending.name = event.data.name
           pending.args = event.data.arguments
+          view.openTools.delete(pending)
+          // Authoritative args replace the streamed text: the streamed-length
+          // version could coincidentally match, so invalidate explicitly.
+          state.renderCache.delete(pending)
         } else {
           view.blocks.push({ kind: 'tool', name: event.data.name, args: event.data.arguments, callId })
         }
@@ -2533,6 +2580,7 @@ export function apply(ctx: Context, config: Config): void {
         if (block !== undefined) {
           if (diffs !== undefined) block.diffs = diffs
           else block.summary = toolResultText(event.data.message)
+          view.openTools.delete(block)
           // The tool block mutated; its memoized rows are stale.
           state.renderCache.delete(block)
         }
@@ -2543,6 +2591,7 @@ export function apply(ctx: Context, config: Config): void {
         break
       case 'turn/end': {
         view.openAssistant = undefined
+        view.openTools.clear()
         view.busy = false
         view.turnStartedAt = undefined
         if (isCurrent && state.term === undefined) state.plainOut?.write('\n')
