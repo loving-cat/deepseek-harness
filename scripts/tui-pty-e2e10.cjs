@@ -9,6 +9,10 @@ const child = pty.spawn(process.execPath, ['apps/cli/lib/bin.js', '--profile', '
 })
 
 let buf = ''
+// Filled from the model menu's initially-highlighted row (= the current
+// model): Down+Up returns to it, so Enter re-applies it — the assertion must
+// track the live default instead of a hardcoded id (settings.yaml drifts).
+let menuCurrent = ''
 const started = Date.now()
 const count = (re) => (buf.match(new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g')) || []).length
 const steps = [
@@ -18,11 +22,16 @@ const steps = [
   { name: 'current provider highlighted', need: () => count(/❯ (?:\x1b\[[0-9;]*m)*deepseek-official/) >= 1 },
   { name: 'Enter into provider', send: '\r', delay: 400 },
   { name: 'model picker 2nd level', need: () => count(/model — deepseek-official/) >= 1 },
-  { name: 'current model marked', need: () => count(/\(current\)/) >= 2 },
+  { name: 'current model marked', need: () => {
+    const m = /❯ (?:\x1b\[[0-9;]*m)*(deepseek-v4[\w-]+)/.exec(buf)
+    if (m === null || count(/\(current\)/) < 2) return false
+    menuCurrent = m[1] ?? ''
+    return menuCurrent !== ''
+  } },
   { name: 'Down moves highlight', send: '\x1b[B', delay: 200 },
   { name: 'Up moves back', send: '\x1b[A', delay: 200 },
   { name: 'Enter applies model', send: '\r', delay: 400 },
-  { name: 'model switch applied', need: () => count(/model → deepseek-official \/ deepseek-v4-pro-0813/) >= 1 },
+  { name: 'model switch applied', need: () => menuCurrent !== '' && count(new RegExp('model → deepseek-official \\/ ' + menuCurrent.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))) >= 1 },
   { name: 'reopen /model', send: '/model\r', delay: 400 },
   { name: 'provider picker again', need: () => count(/model provider/) >= 2 },
   { name: 'Enter into provider', send: '\r', delay: 400 },
