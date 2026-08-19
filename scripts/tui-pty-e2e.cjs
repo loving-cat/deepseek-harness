@@ -23,7 +23,9 @@ const steps = [
   { name: 'task submitted', wait: null, send: 'Reply with exactly the single token TUI_OK and nothing else. Do not call any tools; answer directly.\r' },
   { name: 'turn started', wait: /[⠋⠙⠹⠸⠼⠴⦾⦿]/, send: null },
   { name: 'turn finished', wait: /○ idle/, send: '/help\r' },
-  { name: 'help lists fork turn syntax', wait: /\/fork \[turn\]/, send: '/fork\r' },
+  // The help text is ~41 wrapped rows — taller than the 30-row window, so
+  // only its tail is visible; assert on the last line, not an early one.
+  { name: 'help renders its tail line', wait: /Large pastes collapse/, send: '/fork\r' },
   { name: 'fork turn picker', wait: /fork at a past turn/, send: 'latest\r' },
   { name: 'forked + status shows 2 sessions', wait: /2 sessions[\s\S]*?forked @ latest point/, send: '/sessions\r' },
   { name: 'sessions switcher lists live', wait: /●[\s\S]*\(current\)/, send: '1\r' },
@@ -58,17 +60,21 @@ let stepsDone = false
 child.onData((data) => {
   buf += data
   if (!stepsDone) {
-    // A fresh 'approve …' prompt → allow once (also advances qMark so the
-    // trailing '?' of the approval text cannot trigger the question path).
+    // A fresh approval modal ('⚠ approve <tool>?') → allow once. The ⚠ is
+    // load-bearing: a bare /approve / also matches the /help text ('toggle
+    // auto-approve for this session'), which fired a phantom 'y' into the
+    // editor — it landed as a queued CHAT message after the fork and stalled
+    // the run (the historical '偶发卡 step 6/9' was this, not model whims).
     const atail = buf.slice(approveMark)
-    if (/approve /.test(atail)) {
+    if (/⚠ approve /.test(atail)) {
       approveMark = buf.length
       qMark = buf.length
       setTimeout(() => { try { child.write('y\r') } catch {} }, 300)
     } else {
-      // A fresh '? ' modal (ask_user_question) → pick the first option.
+      // A fresh ask_user_question modal → pick the first option. The label is
+      // cyan ('\x1b[36m? …'); a bare '? ' would false-match reasoning text.
       const qtail = buf.slice(qMark)
-      if (/\? /.test(qtail)) {
+      if (/\x1b\[36m\? /.test(qtail)) {
         qMark = buf.length
         setTimeout(() => { try { child.write('1\r') } catch {} }, 300)
       }
